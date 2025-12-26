@@ -24,14 +24,14 @@ if 'watchlist' not in st.session_state:
 RISK_PER_TRADE = 1000
 
 # ==============================================================================
-# 🧠 OPTIMIZED ENGINE (BULK FETCH)
+# 🧠 OPTIMIZED ENGINE (FIXED FOR SERIES ERROR)
 # ==============================================================================
 
 def get_live_prices_bulk(ticker_list):
     """
     High-Performance Bulk Fetch: 
-    Downloads all 50+ stocks in 1 single HTTP request.
-    Prevents Yahoo Finance from blocking the IP.
+    Downloads all stocks in 1 request.
+    FIXED: Ensures prices are returned as simple Floats, not Pandas Series.
     """
     if not ticker_list:
         return {}
@@ -42,29 +42,43 @@ def get_live_prices_bulk(ticker_list):
         
         live_prices = {}
         
-        # Handle Single Ticker vs Multiple Tickers structure
+        # CASE 1: Single Ticker (Structure is Flat)
         if len(ticker_list) == 1:
-            # If only 1 ticker, structure is simple
             ticker = ticker_list[0]
             if not data.empty:
-                live_prices[ticker] = data['Close'].iloc[-1]
+                # Force convert to scalar float using .iloc[-1].item()
+                try:
+                    price = data['Close'].iloc[-1]
+                    if isinstance(price, pd.Series): 
+                        price = price.iloc[0] # Handle rare double-series case
+                    live_prices[ticker] = float(price)
+                except:
+                    live_prices[ticker] = 0.0
+
+        # CASE 2: Multiple Tickers (Structure is Nested)
         else:
-            # If multiple, structure is nested
             for ticker in ticker_list:
                 try:
-                    # Check if column exists (some tickers might fail)
-                    if (ticker, 'Close') in data.columns:
-                        price = data[ticker]['Close'].iloc[-1]
-                    elif ticker in data.columns and 'Close' in data[ticker]:
-                        price = data[ticker]['Close'].iloc[-1]
+                    # Check for data existence
+                    if ticker in data.columns:
+                        # Extract the 'Close' series
+                        close_series = data[ticker]['Close']
+                        
+                        # Get the last value safely
+                        if not close_series.empty:
+                            raw_price = close_series.iloc[-1]
+                            
+                            # CRITICAL FIX: Ensure it's a float, not a Series
+                            if isinstance(raw_price, pd.Series):
+                                raw_price = raw_price.values[0]
+                                
+                            live_prices[ticker] = float(raw_price)
+                        else:
+                            live_prices[ticker] = 0.0
                     else:
-                        price = 0.0
-                    
-                    # Handle NaN
-                    if pd.isna(price): price = 0.0
-                    live_prices[ticker] = price
-                except:
-                    continue
+                        live_prices[ticker] = 0.0
+                except Exception:
+                    live_prices[ticker] = 0.0
                     
         return live_prices
     except Exception as e:
@@ -85,14 +99,11 @@ def run_scanner():
     tickers = get_nifty500()
     results = []
     
-    # Progress Bar
     progress = st.progress(0)
     status_text = st.empty()
     
     # Scanning first 50 stocks
     scan_limit = 50 
-    
-    # Bulk fetch history for scanner (Optimization)
     subset = tickers[:scan_limit]
     
     for i, ticker in enumerate(subset):
@@ -108,11 +119,14 @@ def run_scanner():
             
             trigger = prev_high * 1.001
             
+            # Ensure Trigger is a float
+            trigger = float(trigger)
+            
             results.append({
                 "Ticker": ticker,
                 "Trigger": trigger,
-                "Stop Loss": trigger - (atr * 1.5),
-                "Target": trigger + (atr * 3)
+                "Stop Loss": float(trigger - (atr * 1.5)),
+                "Target": float(trigger + (atr * 3))
             })
         except: continue
     
@@ -159,7 +173,7 @@ def close_position(index, price, reason):
 # 🖥️ DASHBOARD UI
 # ==============================================================================
 st.title("⚡ High-Speed Paper Bot")
-st.markdown(f"**Status:** Optimized Connection | **Time:** {datetime.now().strftime('%H:%M:%S')}")
+st.markdown(f"**Status:** Stable V2 | **Time:** {datetime.now().strftime('%H:%M:%S')}")
 
 col1, col2 = st.columns([1, 4])
 if col1.button("🚀 START MORNING SCAN", type="primary"):
@@ -170,9 +184,8 @@ enable_auto = st.checkbox("✅ ENABLE AUTO-TRADING", value=True)
 st.divider()
 
 # ------------------------------------------------------------------
-# 1. BULK FETCH ALL DATA FIRST (The Fix)
+# 1. BULK FETCH ALL DATA FIRST
 # ------------------------------------------------------------------
-# We gather ALL needed tickers (Portfolio + Watchlist) and fetch in 1 go
 all_tickers_needed = []
 if not st.session_state.portfolio.empty:
     all_tickers_needed.extend(st.session_state.portfolio['Ticker'].tolist())
@@ -194,14 +207,16 @@ if not st.session_state.portfolio.empty:
     
     for i, row in st.session_state.portfolio.iterrows():
         ticker = row['Ticker']
-        # Use bulk data
-        curr = live_price_map.get(ticker, row['Buy Price'])
         
-        # Calculate Stats
+        # Safe Get with Float Conversion
+        curr = live_price_map.get(ticker, 0.0)
+        if curr == 0.0: curr = row['Buy Price'] # Fallback if fetch fails
+        
+        curr = float(curr) # Double Safety
+        
         pnl = (curr - row['Buy Price']) * row['Qty']
         pnl_pct = ((curr - row['Buy Price']) / row['Buy Price']) * 100
         
-        # EXIT LOGIC
         if enable_auto and curr > 0:
             if curr <= row['Stop Loss']:
                 close_position(i, curr, "STOP LOSS")
@@ -223,13 +238,12 @@ else:
 st.divider()
 
 # ------------------------------------------------------------------
-# 3. RENDER WATCHLIST (Fast Version)
+# 3. RENDER WATCHLIST
 # ------------------------------------------------------------------
 st.subheader("📡 Scanner Watchlist")
 
 if not st.session_state.watchlist.empty:
     with st.container():
-        # Headers
         c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.5])
         c1.markdown("**Ticker**"); c2.markdown("**Price**"); c3.markdown("**Trigger**")
         c4.markdown("**Dist**"); c5.markdown("**Status**")
@@ -237,14 +251,15 @@ if not st.session_state.watchlist.empty:
         
         for index, row in st.session_state.watchlist.iterrows():
             ticker = row['Ticker']
-            trigger = row['Trigger']
+            trigger = float(row['Trigger'])
             
-            # Use bulk data
             current_price = live_price_map.get(ticker, 0.0)
             
-            if current_price == 0.0:
-                continue # Skip if no data
-                
+            if current_price == 0.0: continue
+            
+            # THE FIX: Ensure boolean comparison is safe
+            current_price = float(current_price) 
+            
             dist = ((current_price - trigger) / trigger) * 100
             
             status_emoji = "⏳"
@@ -260,7 +275,6 @@ if not st.session_state.watchlist.empty:
                 status_emoji = "👀"
                 color = "orange"
                 
-            # Render
             c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.5])
             c1.write(ticker)
             c2.write(f"{current_price:.2f}")
