@@ -103,7 +103,7 @@ def run_scanner():
     status_text = st.empty()
     
     # Scanning first 50 stocks
-    scan_limit = 50 
+    scan_limit = tickers
     subset = tickers[:scan_limit]
     
     for i, ticker in enumerate(subset):
