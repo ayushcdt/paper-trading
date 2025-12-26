@@ -167,8 +167,8 @@ def close_trade(index, price, reason):
 # ==============================================================================
 # 🖥️ DASHBOARD UI
 # ==============================================================================
-st.title("🦅 Precision Paper Bot (Vision Fixed)")
-st.markdown("**Status:** Monitoring Live Targets")
+st.title("🦅 Precision Paper Bot (Final Version)")
+st.markdown("**Status:** Monitoring Live Targets | **History:** Enabled")
 
 with st.sidebar:
     scan_size = st.slider("Stocks to Analyze", 50, 500, 200)
@@ -255,7 +255,28 @@ if not st.session_state.watchlist.empty:
 else:
     st.info("Scanner is empty. Click 'RUN MARKET SCAN'.")
 
-# 5. AUTO REFRESH (30s)
+st.divider()
+
+# 5. TRADE HISTORY & DOWNLOAD
+st.subheader("📜 Trade History")
+
+if not st.session_state.trade_log.empty:
+    # Show the Table (Sorted Newest First)
+    st.dataframe(st.session_state.trade_log.sort_index(ascending=False), use_container_width=True)
+    
+    # Download Button
+    csv = st.session_state.trade_log.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="⬇️ Download Trade Log (CSV)",
+        data=csv,
+        file_name="paper_trade_history.csv",
+        mime="text/csv",
+        type="primary"
+    )
+else:
+    st.info("No trades executed yet.")
+
+# 6. AUTO REFRESH (30s)
 if enable_auto:
     time.sleep(30)
     st.rerun()
