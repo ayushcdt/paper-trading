@@ -24,23 +24,8 @@ if 'watchlist' not in st.session_state:
 RISK_PER_TRADE = 1000
 
 # ==============================================================================
-# 🧠 ENGINE: THE "FUNNEL" (Scan Many -> Monitor Few)
+# 🧠 HELPER FUNCTIONS (Data & Logic)
 # ==============================================================================
-
-def get_live_price(ticker):
-    """
-    Fetches price for a SINGLE ticker.
-    Used only for the small list of active targets.
-    """
-    try:
-        # Use history() which is often more reliable than download() for single files
-        stock = yf.Ticker(ticker)
-        data = stock.history(period="1d", interval="1m")
-        if not data.empty:
-            return float(data['Close'].iloc[-1])
-        return 0.0
-    except:
-        return 0.0
 
 @st.cache_data(ttl=600)
 def get_nifty500():
@@ -53,10 +38,48 @@ def get_nifty500():
     except:
         return ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "INFY.NS", "BHEL.NS", "ITC.NS", "MRF.NS"]
 
+def get_live_prices_bulk(tickers):
+    """
+    Fetches real-time prices for MULTIPLE tickers in ONE request.
+    This fixes the 'Blindness' / 'Loading...' issue.
+    """
+    if not tickers: return {}
+    
+    try:
+        # Download 1-minute data for all tickers at once
+        data = yf.download(tickers, period="1d", interval="1m", group_by='ticker', progress=False, threads=True)
+        
+        live_prices = {}
+        
+        # CASE 1: Single Ticker in list
+        if len(tickers) == 1:
+            t = tickers[0]
+            try:
+                price = data['Close'].iloc[-1]
+                if isinstance(price, pd.Series): price = price.iloc[0]
+                live_prices[t] = float(price)
+            except: live_prices[t] = 0.0
+            
+        # CASE 2: Multiple Tickers in list
+        else:
+            for t in tickers:
+                try:
+                    if t in data.columns:
+                        val = data[t]['Close'].iloc[-1]
+                        if isinstance(val, pd.Series): val = val.values[0]
+                        live_prices[t] = float(val)
+                    else:
+                        live_prices[t] = 0.0
+                except: live_prices[t] = 0.0
+                
+        return live_prices
+    except:
+        return {}
+
 def run_scanner_snapshot(scan_limit):
     """
-    This runs ONCE. It downloads daily data to find setups.
-    It does NOT need to be live.
+    Scans daily data to find setups. 
+    Filters strictly for the Top 20 closest to breakout.
     """
     tickers = get_nifty500()
     results = []
@@ -73,30 +96,26 @@ def run_scanner_snapshot(scan_limit):
         status.write(f"Analyzing {ticker}...")
         
         try:
-            # Handle Single vs Multi-Index
-            if len(subset) == 1:
-                df = data
+            # Handle Data Structure
+            if len(subset) == 1: df = data
             else:
                 if ticker not in data.columns: continue
                 df = data[ticker]
             
-            # Logic: Yesterday's High Breakout
             if df.empty: continue
             
-            # Clean NaN rows
+            # Clean & Check
             df = df.dropna()
             if len(df) < 2: continue
             
-            prev_high = float(df['High'].iloc[-2]) # Yesterday's High
+            prev_high = float(df['High'].iloc[-2])
             current_close = float(df['Close'].iloc[-1])
             atr = float((df['High'] - df['Low']).mean())
             
             trigger = prev_high * 1.001
-            
-            # Filter: Only keep stocks that are CLOSE to trigger (within 2%)
-            # This is the FUNNEL. We don't care about stocks 10% away.
             dist_pct = ((current_close - trigger) / trigger) * 100
             
+            # THE FUNNEL: Only keep stocks within -2% to +1% of trigger
             if dist_pct > -2.0 and dist_pct < 1.0:
                 results.append({
                     "Ticker": ticker,
@@ -110,10 +129,10 @@ def run_scanner_snapshot(scan_limit):
     progress.empty()
     status.empty()
     
-    # Sort by closest to breakout
+    # Return Top 20 Closest
     final_df = pd.DataFrame(results)
     if not final_df.empty:
-        final_df = final_df.sort_values(by="Dist", ascending=False).head(20) # KEEP ONLY TOP 20
+        final_df = final_df.sort_values(by="Dist", ascending=False).head(20)
         
     return final_df
 
@@ -148,64 +167,78 @@ def close_trade(index, price, reason):
 # ==============================================================================
 # 🖥️ DASHBOARD UI
 # ==============================================================================
-st.title("🦅 Precision Paper Bot")
-st.markdown("**Strategy:** Scan 200 -> Filter Top 20 -> Monitor Live")
+st.title("🦅 Precision Paper Bot (Vision Fixed)")
+st.markdown("**Status:** Monitoring Live Targets")
 
 with st.sidebar:
-    scan_size = st.slider("Stocks to Analyze", 50, 500, 100)
+    scan_size = st.slider("Stocks to Analyze", 50, 500, 200)
     enable_auto = st.toggle("✅ Enable Auto-Trading", value=True)
-    if st.button("🔴 Stop / Reset"):
+    if st.button("🔴 Reset Portfolio"):
         st.cache_data.clear()
         st.session_state.portfolio = pd.DataFrame(columns=["Ticker", "Buy Price", "Qty", "Stop Loss", "Target", "Entry Time"])
         st.session_state.watchlist = pd.DataFrame()
         st.rerun()
 
-# 1. SCANNER (Manual Trigger)
-if st.button("🚀 RUN MARKET SCAN", type="primary"):
-    with st.spinner(f"Filtering Top 20 Candidates from {scan_size} stocks..."):
+# 1. PREPARE TICKER LIST FOR BULK FETCH
+all_tickers = []
+if not st.session_state.portfolio.empty:
+    all_tickers.extend(st.session_state.portfolio['Ticker'].tolist())
+if not st.session_state.watchlist.empty:
+    all_tickers.extend(st.session_state.watchlist['Ticker'].tolist())
+
+# 2. BULK FETCH (This is the Magic Fix)
+live_map = get_live_prices_bulk(list(set(all_tickers)))
+
+col1, col2 = st.columns([1, 4])
+if col1.button("🚀 RUN MARKET SCAN", type="primary"):
+    with st.spinner(f"Filtering Candidates..."):
         st.session_state.watchlist = run_scanner_snapshot(scan_size)
 
 st.divider()
 
-# 2. ACTIVE TRADES MONITOR (Live)
+# 3. ACTIVE TRADES MONITOR
 st.subheader("💼 Active Positions")
 if not st.session_state.portfolio.empty:
     disp = []
     for i, row in st.session_state.portfolio.iterrows():
         ticker = row['Ticker']
-        # Fetch Live Price Single
-        curr = get_live_price(ticker)
+        buy = row['Buy Price']
         
-        if curr <= 0: curr = row['Buy Price'] # Fallback
+        # Get Price from Bulk Map
+        curr = float(live_map.get(ticker, 0.0))
         
-        pnl = (curr - row['Buy Price']) * row['Qty']
-        
-        if enable_auto and curr > 0:
-            if curr <= row['Stop Loss']: close_trade(i, curr, "STOP LOSS"); st.rerun()
-            elif curr >= row['Target']: close_trade(i, curr, "TARGET HIT"); st.rerun()
+        if curr <= 0: 
+            curr = buy # Fallback if data lag
+            status = "⚠️ Checking..."
+        else:
+            status = "ACTIVE"
+            if enable_auto:
+                if curr <= row['Stop Loss']: close_trade(i, curr, "STOP LOSS"); st.rerun()
+                elif curr >= row['Target']: close_trade(i, curr, "TARGET HIT"); st.rerun()
             
-        disp.append({"Ticker": ticker, "Entry": row['Buy Price'], "Current": f"{curr:.2f}", "P&L": f"{pnl:.2f}"})
+        pnl = (curr - buy) * row['Qty']
+        disp.append({"Ticker": ticker, "Entry": buy, "Price": f"{curr:.2f}", "P&L": f"{pnl:.2f}", "Status": status})
+        
     st.dataframe(pd.DataFrame(disp))
 else:
     st.info("No active trades.")
 
 st.divider()
 
-# 3. WATCHLIST MONITOR (Live - Only Top 20)
+# 4. WATCHLIST MONITOR (Top 20)
 st.subheader(f"📡 High-Probability Watchlist ({len(st.session_state.watchlist)})")
 if not st.session_state.watchlist.empty:
+    w_data = []
     
-    # We loop through the SHORTLIST only
-    live_data = []
     for idx, row in st.session_state.watchlist.iterrows():
         ticker = row['Ticker']
         trig = row['Trigger']
         
-        # Fetch Live Price
-        curr = get_live_price(ticker)
+        # Get Price from Bulk Map
+        curr = float(live_map.get(ticker, 0.0))
         
         if curr <= 0:
-            live_data.append([ticker, "---", f"{trig:.2f}", "---", "⏳"])
+            w_data.append([ticker, "---", f"{trig:.2f}", "---", "⏳ Loading..."])
             continue
             
         dist = ((curr - trig) / trig) * 100
@@ -215,15 +248,14 @@ if not st.session_state.watchlist.empty:
             status = "🔥 BREAKOUT"
             if enable_auto: execute_trade(ticker, curr, row['Stop Loss'], row['Target']); st.rerun()
         
-        live_data.append([ticker, f"{curr:.2f}", f"{trig:.2f}", f"{dist:.2f}%", status])
-        time.sleep(0.1) # Small delay to prevent block
+        w_data.append([ticker, f"{curr:.2f}", f"{trig:.2f}", f"{dist:.2f}%", status])
         
-    st.dataframe(pd.DataFrame(live_data, columns=["Ticker", "Live Price", "Trigger", "Dist %", "Status"]))
+    st.dataframe(pd.DataFrame(w_data, columns=["Ticker", "Live Price", "Trigger", "Dist %", "Status"]))
 
 else:
-    st.info("Scanner is empty. Click 'RUN MARKET SCAN' to find top targets.")
+    st.info("Scanner is empty. Click 'RUN MARKET SCAN'.")
 
-# 4. SLOW AUTO REFRESH (60s)
+# 5. AUTO REFRESH (30s)
 if enable_auto:
-    time.sleep(60)
+    time.sleep(30)
     st.rerun()
