@@ -10,11 +10,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==============================================================================
-# ⚙️ CONFIGURATION & STATE
+# ⚙️ CONFIGURATION
 # ==============================================================================
 st.set_page_config(page_title="Auto-Paper Bot", layout="wide", page_icon="🤖")
 
-# Initialize Virtual Portfolio in Session State
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = pd.DataFrame(columns=["Ticker", "Buy Price", "Qty", "Stop Loss", "Target", "Entry Time"])
 if 'trade_log' not in st.session_state:
@@ -22,11 +21,54 @@ if 'trade_log' not in st.session_state:
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = pd.DataFrame()
 
-RISK_PER_TRADE = 1000  # Max loss per trade (in INR)
+RISK_PER_TRADE = 1000
 
 # ==============================================================================
-# 🧠 TRADING ENGINES
+# 🧠 OPTIMIZED ENGINE (BULK FETCH)
 # ==============================================================================
+
+def get_live_prices_bulk(ticker_list):
+    """
+    High-Performance Bulk Fetch: 
+    Downloads all 50+ stocks in 1 single HTTP request.
+    Prevents Yahoo Finance from blocking the IP.
+    """
+    if not ticker_list:
+        return {}
+    
+    try:
+        # Download all data at once
+        data = yf.download(ticker_list, period="1d", interval="1m", group_by='ticker', progress=False, threads=True)
+        
+        live_prices = {}
+        
+        # Handle Single Ticker vs Multiple Tickers structure
+        if len(ticker_list) == 1:
+            # If only 1 ticker, structure is simple
+            ticker = ticker_list[0]
+            if not data.empty:
+                live_prices[ticker] = data['Close'].iloc[-1]
+        else:
+            # If multiple, structure is nested
+            for ticker in ticker_list:
+                try:
+                    # Check if column exists (some tickers might fail)
+                    if (ticker, 'Close') in data.columns:
+                        price = data[ticker]['Close'].iloc[-1]
+                    elif ticker in data.columns and 'Close' in data[ticker]:
+                        price = data[ticker]['Close'].iloc[-1]
+                    else:
+                        price = 0.0
+                    
+                    # Handle NaN
+                    if pd.isna(price): price = 0.0
+                    live_prices[ticker] = price
+                except:
+                    continue
+                    
+        return live_prices
+    except Exception as e:
+        return {}
 
 @st.cache_data(ttl=300)
 def get_nifty500():
@@ -37,38 +79,34 @@ def get_nifty500():
         df = pd.read_csv(io.StringIO(s.decode('utf-8')))
         return [x + ".NS" for x in df['Symbol'].tolist()]
     except:
-        # Fallback list if NSE website is slow
-        return ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "MARUTI.NS", "BHEL.NS", "BIKAJI.NS", "ITC.NS", "INFY.NS", "TATAMOTORS.NS"]
+        return ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "MARUTI.NS", "BHEL.NS", "BIKAJI.NS", "ADANIENSOL.NS", "APOLLOHOSP.NS"]
 
 def run_scanner():
-    """Scans for setups based on Yesterday's High"""
     tickers = get_nifty500()
     results = []
     
-    # Progress Bar for UX
+    # Progress Bar
     progress = st.progress(0)
     status_text = st.empty()
     
-    # Scanning first 50 stocks for speed (Increase number for full market)
+    # Scanning first 50 stocks
     scan_limit = 50 
     
-    for i, ticker in enumerate(tickers[:scan_limit]):
+    # Bulk fetch history for scanner (Optimization)
+    subset = tickers[:scan_limit]
+    
+    for i, ticker in enumerate(subset):
         progress.progress((i+1)/scan_limit)
         status_text.text(f"Scanning {ticker}...")
-        
         try:
-            # Get 5 days of 15m data to find trend & levels
             df = yf.download(ticker, period="5d", interval="15m", progress=False)
             if df.empty: continue
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             
-            # Logic: Breakout of Previous Day's High
-            # (Simplifying logic for robustness)
+            # Logic: Breakout of Yesterday's High
             prev_high = df['High'].iloc[:-1].max()
             atr = (df['High'] - df['Low']).mean()
             
-            # Define Trigger (Breakout Point)
-            trigger = prev_high * 1.001 # 0.1% Buffer
+            trigger = prev_high * 1.001
             
             results.append({
                 "Ticker": ticker,
@@ -83,182 +121,160 @@ def run_scanner():
     return pd.DataFrame(results)
 
 def execute_paper_trade(ticker, price, stop, target):
-    """AUTO-BUY LOGIC"""
-    # 1. Check if already in portfolio to avoid duplicate buys
     if not st.session_state.portfolio.empty:
         if ticker in st.session_state.portfolio['Ticker'].values:
             return 
             
-    # 2. Position Sizing (Risk Management)
     risk = price - stop
     qty = int(RISK_PER_TRADE / risk) if risk > 0 else 1
     if qty < 1: qty = 1
     
-    # 3. Add to Portfolio
     new_trade = {
-        "Ticker": ticker,
-        "Buy Price": price,
-        "Qty": qty,
-        "Stop Loss": stop,
-        "Target": target,
-        "Entry Time": datetime.now().strftime("%H:%M:%S")
+        "Ticker": ticker, "Buy Price": price, "Qty": qty, 
+        "Stop Loss": stop, "Target": target, "Entry Time": datetime.now().strftime("%H:%M:%S")
     }
     st.session_state.portfolio = pd.concat([st.session_state.portfolio, pd.DataFrame([new_trade])], ignore_index=True)
     
-    # 4. Log the Trade
     log_entry = {
         "Ticker": ticker, "Action": "BUY", "Price": price, 
         "Time": datetime.now().strftime("%H:%M"), "PnL": 0, "Result": "OPEN"
     }
     st.session_state.trade_log = pd.concat([st.session_state.trade_log, pd.DataFrame([log_entry])], ignore_index=True)
-    
-    # 5. User Feedback
-    st.toast(f"🤖 BOUGHT {ticker} at {price}", icon="🛒")
+    st.toast(f"🤖 BOUGHT {ticker}", icon="🛒")
 
 def close_position(index, price, reason):
-    """AUTO-SELL LOGIC"""
     trade = st.session_state.portfolio.iloc[index]
     pnl = (price - trade['Buy Price']) * trade['Qty']
     
-    # Log Exit
     log_entry = {
         "Ticker": trade['Ticker'], "Action": "SELL", "Price": price, 
         "Time": datetime.now().strftime("%H:%M"), "PnL": round(pnl, 2), "Result": reason
     }
     st.session_state.trade_log = pd.concat([st.session_state.trade_log, pd.DataFrame([log_entry])], ignore_index=True)
     
-    # Remove from Portfolio
     st.session_state.portfolio = st.session_state.portfolio.drop(index).reset_index(drop=True)
-    st.toast(f"❌ SOLD {trade['Ticker']} ({reason}) PnL: {pnl:.0f}", icon="💰")
+    st.toast(f"❌ SOLD {trade['Ticker']} PnL: {pnl:.0f}", icon="💰")
 
 # ==============================================================================
 # 🖥️ DASHBOARD UI
 # ==============================================================================
-st.title("🤖 Autonomous Paper-Trading Bot")
-st.markdown(f"**Status:** System Live | **Time:** {datetime.now().strftime('%H:%M:%S')}")
+st.title("⚡ High-Speed Paper Bot")
+st.markdown(f"**Status:** Optimized Connection | **Time:** {datetime.now().strftime('%H:%M:%S')}")
 
-# 1. CONTROL PANEL
 col1, col2 = st.columns([1, 4])
 if col1.button("🚀 START MORNING SCAN", type="primary"):
-    with st.spinner("Analyzing Market Structure..."):
+    with st.spinner("Scanning Market..."):
         st.session_state.watchlist = run_scanner()
-        st.success(f"Scan Complete! Found {len(st.session_state.watchlist)} targets.")
 
-enable_auto = st.checkbox("✅ ENABLE AUTO-TRADING", value=True, help="If checked, bot will auto-buy breakouts.")
-
+enable_auto = st.checkbox("✅ ENABLE AUTO-TRADING", value=True)
 st.divider()
 
-# 2. LIVE PORTFOLIO (Active Trades)
+# ------------------------------------------------------------------
+# 1. BULK FETCH ALL DATA FIRST (The Fix)
+# ------------------------------------------------------------------
+# We gather ALL needed tickers (Portfolio + Watchlist) and fetch in 1 go
+all_tickers_needed = []
+if not st.session_state.portfolio.empty:
+    all_tickers_needed.extend(st.session_state.portfolio['Ticker'].tolist())
+if not st.session_state.watchlist.empty:
+    all_tickers_needed.extend(st.session_state.watchlist['Ticker'].tolist())
+
+# Remove duplicates
+all_tickers_needed = list(set(all_tickers_needed))
+
+# Single Request to Yahoo
+live_price_map = get_live_prices_bulk(all_tickers_needed)
+
+# ------------------------------------------------------------------
+# 2. RENDER ACTIVE POSITIONS
+# ------------------------------------------------------------------
 st.subheader("💼 Active Positions")
 if not st.session_state.portfolio.empty:
     portfolio_display = []
     
     for i, row in st.session_state.portfolio.iterrows():
-        try:
-            # Live Price Check
-            live = yf.download(row['Ticker'], period="1d", interval="1m", progress=False)
-            curr = live['Close'].iloc[-1] if not live.empty else row['Buy Price']
-            
-            pnl = (curr - row['Buy Price']) * row['Qty']
-            pnl_pct = ((curr - row['Buy Price']) / row['Buy Price']) * 100
-            
-            # EXIT LOGIC
-            if enable_auto:
-                if curr <= row['Stop Loss']:
-                    close_position(i, curr, "STOP LOSS")
-                    st.rerun() 
-                elif curr >= row['Target']:
-                    close_position(i, curr, "TARGET HIT")
-                    st.rerun()
-            
-            portfolio_display.append({
-                "Ticker": row['Ticker'], "Buy": row['Buy Price'], "Curr": f"{curr:.2f}",
-                "Qty": row['Qty'], "P&L": f"{pnl:.2f}", "Return": f"{pnl_pct:.2f}%",
-                "SL": f"{row['Stop Loss']:.2f}", "TGT": f"{row['Target']:.2f}"
-            })
-        except: continue
+        ticker = row['Ticker']
+        # Use bulk data
+        curr = live_price_map.get(ticker, row['Buy Price'])
+        
+        # Calculate Stats
+        pnl = (curr - row['Buy Price']) * row['Qty']
+        pnl_pct = ((curr - row['Buy Price']) / row['Buy Price']) * 100
+        
+        # EXIT LOGIC
+        if enable_auto and curr > 0:
+            if curr <= row['Stop Loss']:
+                close_position(i, curr, "STOP LOSS")
+                st.rerun() 
+            elif curr >= row['Target']:
+                close_position(i, curr, "TARGET HIT")
+                st.rerun()
+        
+        portfolio_display.append({
+            "Ticker": ticker, "Buy": row['Buy Price'], "Curr": f"{curr:.2f}",
+            "Qty": row['Qty'], "P&L": f"{pnl:.2f}", "Return": f"{pnl_pct:.2f}%",
+            "SL": f"{row['Stop Loss']:.2f}", "TGT": f"{row['Target']:.2f}"
+        })
         
     st.dataframe(pd.DataFrame(portfolio_display))
 else:
-    st.info("No active positions. Waiting for triggers...")
+    st.info("No active positions.")
 
-# 3. LIVE WATCHLIST (THE HEARTBEAT)
 st.divider()
-st.subheader("📡 Scanner Watchlist (Live Monitor)")
+
+# ------------------------------------------------------------------
+# 3. RENDER WATCHLIST (Fast Version)
+# ------------------------------------------------------------------
+st.subheader("📡 Scanner Watchlist")
 
 if not st.session_state.watchlist.empty:
-    # We use a container to make the visual updates look stable
     with st.container():
-        # Table Headers
-        h1, h2, h3, h4, h5 = st.columns([1.5, 1, 1, 1, 1.5])
-        h1.markdown("**Ticker**")
-        h2.markdown("**Live Price**")
-        h3.markdown("**Trigger**")
-        h4.markdown("**Distance**")
-        h5.markdown("**Status**")
+        # Headers
+        c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.5])
+        c1.markdown("**Ticker**"); c2.markdown("**Price**"); c3.markdown("**Trigger**")
+        c4.markdown("**Dist**"); c5.markdown("**Status**")
         st.markdown("---")
         
-        # Iterating through watchlist
-        watch_data = st.session_state.watchlist.to_dict('records')
-        
-        for row in watch_data:
+        for index, row in st.session_state.watchlist.iterrows():
             ticker = row['Ticker']
             trigger = row['Trigger']
-            stop = row['Stop Loss']
-            target = row['Target']
             
-            try:
-                # Fetch Real-Time Data
-                data = yf.download(ticker, period="1d", interval="1m", progress=False)
-                if data.empty: 
-                    current_price = 0.0
-                else:
-                    if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
-                    current_price = data['Close'].iloc[-1]
+            # Use bulk data
+            current_price = live_price_map.get(ticker, 0.0)
+            
+            if current_price == 0.0:
+                continue # Skip if no data
                 
-                # Calculate Distance to Breakout
-                dist = ((current_price - trigger) / trigger) * 100
+            dist = ((current_price - trigger) / trigger) * 100
+            
+            status_emoji = "⏳"
+            color = "gray"
+            
+            if current_price > trigger:
+                status_emoji = "🔥"
+                color = "green"
+                if enable_auto:
+                    execute_paper_trade(ticker, current_price, row['Stop Loss'], row['Target'])
+                    st.rerun()
+            elif dist > -0.5:
+                status_emoji = "👀"
+                color = "orange"
                 
-                # Determine Status & Color
-                status_emoji = "⏳"
-                status_text = "WAITING"
-                text_color = "gray"
-                
-                if current_price > trigger:
-                    status_emoji = "🔥"
-                    status_text = "BREAKOUT"
-                    text_color = "green"
-                    
-                    # AUTO-EXECUTE TRADE
-                    if enable_auto:
-                        execute_paper_trade(ticker, current_price, stop, target)
-                        
-                elif dist > -0.5: # If within 0.5% of trigger
-                    status_emoji = "👀"
-                    status_text = "NEAR"
-                    text_color = "orange"
-                
-                # Render Row
-                c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.5])
-                c1.write(ticker)
-                c2.write(f"₹{current_price:.2f}")
-                c3.write(f"₹{trigger:.2f}")
-                c4.markdown(f":{text_color}[{dist:.2f}%]")
-                c5.markdown(f":{text_color}[**{status_emoji} {status_text}**]")
-                
-            except Exception as e:
-                continue
+            # Render
+            c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.5])
+            c1.write(ticker)
+            c2.write(f"{current_price:.2f}")
+            c3.write(f"{trigger:.2f}")
+            c4.markdown(f":{color}[{dist:.2f}%]")
+            c5.markdown(f":{color}[{status_emoji}]")
 
 else:
-    st.info("Scanner is empty. Click 'START MORNING SCAN' to initialize.")
+    st.info("Scanner Empty.")
 
 st.divider()
-
-# 4. TRADE HISTORY
 st.subheader("📜 Trade History")
 st.dataframe(st.session_state.trade_log)
 
-# 5. AUTO REFRESH (Keep the Heartbeat Alive)
 if enable_auto:
-    time.sleep(30) # Wait 30 seconds
-    st.rerun()     # Refresh the page
+    time.sleep(30)
+    st.rerun()
