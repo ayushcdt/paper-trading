@@ -1,0 +1,19 @@
+# Angel One SmartAPI
+smartapi-python>=1.3.0
+
+# Data Analysis
+pandas>=2.0.0
+numpy>=1.24.0
+yfinance>=0.2.30
+
+# HTTP Requests
+requests>=2.31.0
+
+# TOTP for 2FA
+pyotp>=2.9.0
+
+# Logging
+logzero>=1.7.0
+
+# Websocket (for live data if needed)
+websocket-client>=1.6.0
