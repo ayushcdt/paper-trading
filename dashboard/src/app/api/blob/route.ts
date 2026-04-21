@@ -18,6 +18,7 @@ const ALLOWED_KEYS = new Set([
   'news',
   'alerts',
   'news_shadow_log',
+  'live_ticks',
 ])
 
 function unauthorized() {

@@ -279,26 +279,14 @@ def run_full_analysis():
     }
     save_local(mf_data, "mutualfunds.json")
 
-    # Combine all data
-    combined_data = {
-        "generated_at": datetime.now().isoformat(),
-        "market": market_analysis,
-        "stocks": stocks_data,
-        "mutualfunds": mf_data
-    }
-
-    # Save combined locally
-    save_local(combined_data, "analysis_combined.json")
-
-    # Append to local history archive
-    save_history_snapshot(combined_data)
-
-    # News enrichment (fail-safe: returns empty if newsapp Supabase not reachable)
+    # News enrichment FIRST so it lands in the saved file (was a bug -- save came before)
     logger.info("\n[News] Fetching news flow + sentiment for picks...")
+    news_block = {"status": "skipped"}
+    news_snap = None
     try:
         pick_symbols = [p["symbol"] for p in stocks_data.get("picks", [])]
         news_snap = fetch_news_snapshot(pick_symbols)
-        combined_data["news"] = {
+        news_block = {
             "status": news_snap.status,
             "article_count": news_snap.article_count,
             "macro": news_snap.macro,
@@ -308,7 +296,22 @@ def run_full_analysis():
         logger.info(f"News: {news_snap.article_count} articles, status={news_snap.status}")
     except Exception as e:
         logger.warning(f"News fetch failed (non-fatal): {e}")
-        combined_data["news"] = {"status": "error", "error": str(e)}
+        news_block = {"status": "error", "error": str(e)}
+
+    # Combine all data
+    combined_data = {
+        "generated_at": datetime.now().isoformat(),
+        "market": market_analysis,
+        "stocks": stocks_data,
+        "mutualfunds": mf_data,
+        "news": news_block,
+    }
+
+    # Save combined locally
+    save_local(combined_data, "analysis_combined.json")
+
+    # Append to local history archive
+    save_history_snapshot(combined_data)
 
     # Paper-trade reconciliation: opens/closes virtual positions based on current picks
     logger.info("\n[Paper] Reconciling virtual portfolio with today's picks...")

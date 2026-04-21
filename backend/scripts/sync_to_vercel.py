@@ -41,6 +41,7 @@ FILE_MAP = {
     "target_state":        "target_state.json",
     "alerts":              "alerts.json",
     "news_shadow_log":     "news_shadow_log.json",
+    "live_ticks":          "live_ticks.json",
 }
 
 

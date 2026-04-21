@@ -193,11 +193,22 @@ class AngelDataFetcher:
         exchange: str = "NSE"
     ) -> pd.DataFrame:
         """
-        Get historical candle data
-
-        interval: ONE_MINUTE, FIVE_MINUTE, FIFTEEN_MINUTE,
-                  THIRTY_MINUTE, ONE_HOUR, ONE_DAY
+        DB-aware historical data.
+          - For ONE_DAY interval: read from local bars.db first; only call Angel
+            if DB has gaps. Dramatically reduces Angel rate-limit pressure.
+          - For intraday intervals: always call Angel (rare path).
         """
+        # Fast path: daily bars from local cache
+        if interval == "ONE_DAY":
+            try:
+                from data_store import get_bars, latest_date, upsert_bars
+                cached = get_bars(symbol, n_days=days)
+                if len(cached) >= max(200, int(days * 0.6)):  # "enough" coverage
+                    return cached
+                # DB doesn't have enough yet -- fall through to Angel fetch + upsert
+            except Exception as e:
+                logger.debug(f"DB read failed for {symbol}, falling back to Angel: {e}")
+
         if not self.logged_in:
             self.login()
 
@@ -207,14 +218,11 @@ class AngelDataFetcher:
                 logger.warning(f"Token not found for {symbol}")
                 return pd.DataFrame()
 
-            # Check if this is an index (tokens starting with 999)
-            is_index = token.startswith("999")
-
             to_date = datetime.now()
             from_date = to_date - timedelta(days=days)
 
             params = {
-                "exchange": "NSE",  # NSE for both stocks and indices
+                "exchange": "NSE",
                 "symboltoken": token,
                 "interval": interval,
                 "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
@@ -229,6 +237,13 @@ class AngelDataFetcher:
                     columns=["Date", "Open", "High", "Low", "Close", "Volume"]
                 )
                 df["Date"] = pd.to_datetime(df["Date"])
+                # Persist daily bars to DB so subsequent calls are free
+                if interval == "ONE_DAY" and not df.empty:
+                    try:
+                        from data_store import upsert_bars
+                        upsert_bars(symbol, df)
+                    except Exception as e:
+                        logger.debug(f"DB upsert failed for {symbol}: {e}")
                 return df
             else:
                 logger.warning(f"No historical data for {symbol}: {data.get('message', 'Unknown error')}")
