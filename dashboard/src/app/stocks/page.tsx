@@ -1,10 +1,12 @@
 import { getAnalysisData } from '@/lib/data'
+import { getNewsBlock } from '@/lib/news'
+import { NewsBadge } from '@/components/NewsBadge'
 import { TrendingUp, Target, Shield, AlertTriangle } from 'lucide-react'
 
 export const revalidate = 60
 
 export default async function StocksPage() {
-  const data = await getAnalysisData()
+  const [data, news] = await Promise.all([getAnalysisData(), getNewsBlock()])
   const { stocks } = data
 
   return (
@@ -49,6 +51,7 @@ export default async function StocksPage() {
                   <div>
                     <h3 className="text-xl font-bold text-gray-900">{stock.symbol}</h3>
                     <p className="text-sm text-gray-500">{stock.name}</p>
+                    <NewsBadge symbol={stock.symbol} news={news} />
                   </div>
                 </div>
               </div>

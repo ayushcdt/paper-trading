@@ -288,16 +288,20 @@ def run_full_analysis():
         news_snap = fetch_news_snapshot(pick_symbols)
         news_block = {
             "status": news_snap.status,
+            "fetched_at": news_snap.fetched_at,
             "article_count": news_snap.article_count,
             "macro": news_snap.macro,
             "symbol_mentions": news_snap.symbol_mentions,
             "earnings_titles": news_snap.earnings_titles[:10],
             "today_results": news_snap.today_results,
             "pending_results": news_snap.pending_results,
+            "legal_today": news_snap.legal_today,
+            "hot_stories": news_snap.hot_stories,
         }
         logger.info(
             f"News: {news_snap.article_count} articles, status={news_snap.status}, "
-            f"results_today={len(news_snap.today_results)}, pending_intimations={len(news_snap.pending_results)}"
+            f"filed_today={len(news_snap.today_results)}, pending={len(news_snap.pending_results)}, "
+            f"legal_today={len(news_snap.legal_today)}, hot_stories={len(news_snap.hot_stories)}"
         )
     except Exception as e:
         logger.warning(f"News fetch failed (non-fatal): {e}")

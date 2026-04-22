@@ -225,6 +225,32 @@ def check_and_alert(
                         alerts_fired += 1
                         prev[key] = now_iso
 
+    # ---- Legal-category articles on held positions (SEBI orders, court rulings).
+    # Phase 2 uses entity-precise matching: check if any held symbol's name
+    # variants appear in the article's extracted org list.
+    if news_snap and paper_snap:
+        try:
+            from news.symbols import names_for as _names_for
+        except Exception:
+            _names_for = lambda s: [s]
+        held = {p["symbol"] for p in paper_snap.get("open_positions", [])}
+        legal_today = getattr(news_snap, "legal_today", None) or []
+        for sym in held:
+            variants_lower = {n.lower() for n in _names_for(sym)}
+            if not variants_lower:
+                continue
+            for art in legal_today:
+                art_orgs_lower = {o.lower() for o in (art.get("orgs") or [])}
+                if not (art_orgs_lower & variants_lower):
+                    continue
+                key = f"legal_{sym}_{art.get('url','')[:60]}"
+                if not prev.get(key):
+                    dispatch("warning",
+                             f"Legal/regulatory news: {sym}",
+                             f"{art.get('source','?')}\n{art.get('title','')[:200]}\n{art.get('url','')}")
+                    alerts_fired += 1
+                    prev[key] = now_iso
+
     prev["updated_at"] = now_iso
     _save_state(prev)
     return alerts_fired

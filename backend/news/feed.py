@@ -39,6 +39,7 @@ CACHE_TTL_MINUTES = 30
 
 
 from news.lexicon import score_text as _lm_score_text
+from news.symbols import names_for as _names_for_symbol
 
 # Half-life: 24h for liquid names means an article from 24h ago has half the
 # impact of one from now; 48h ago has 1/4; 72h ago has 1/8. After 7 days:
@@ -119,8 +120,11 @@ def _fetch_recent_articles(hours: int = 168) -> list[dict]:
         cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
         url = f"{SUPABASE_URL}/rest/v1/articles"
         params = {
-            "select": "id,title,excerpt,body,source,category,published_at,url",
-            "category": "in.(business,wire,filings)",
+            # entities + story_id added in Phase 2 for precise org matching + buzz signal.
+            # govt + legal added: govt = PIB releases (RBI, fiscal); legal = SEBI orders + court
+            # rulings (insider bans, listing suspensions) -- both move stocks immediately.
+            "select": "id,title,excerpt,body,source,category,published_at,url,entities,story_id",
+            "category": "in.(business,wire,filings,govt,legal)",
             "published_at": f"gte.{cutoff}",
             "order": "published_at.desc",
             "limit": "2000",
@@ -160,41 +164,78 @@ def _article_age_hours(article: dict, now: datetime) -> float:
         return 999.0  # very stale -> near-zero weight
 
 
-def _mention_count(articles: list[dict], symbol: str, company_keywords: list[str]) -> tuple[int, int]:
-    """Return (count_24h, count_7d) of articles mentioning symbol or any company_keyword."""
+def _article_orgs(article: dict) -> set[str]:
+    """Lowercased set of org-entity names extracted by newsapp's brain.
+    Empty set if entities not yet populated for this article."""
+    ents = article.get("entities") or {}
+    if not isinstance(ents, dict):
+        return set()
+    orgs = ents.get("orgs") or []
+    return {o.strip().lower() for o in orgs if isinstance(o, str)}
+
+
+def _matches_symbol(article: dict, name_variants_lower: set[str]) -> bool:
+    """Phase 2: entity-first match. Falls back to title/excerpt substring for
+    raw articles that haven't been entity-extracted yet (lag in pipeline)."""
+    orgs = _article_orgs(article)
+    if orgs and orgs & name_variants_lower:
+        return True
+    # Fallback: case-insensitive substring on title+excerpt for un-enriched
+    # articles. We deliberately skip body (too noisy for substring match).
+    if not orgs:
+        hay = ((article.get("title") or "") + " " + (article.get("excerpt") or "")).lower()
+        for name in name_variants_lower:
+            if len(name) >= 4 and name in hay:
+                return True
+    return False
+
+
+def _articles_for_symbol(articles: list[dict], symbol: str) -> list[dict]:
+    """Returns the subset of articles relevant to `symbol`, using entity match."""
+    variants = _names_for_symbol(symbol)
+    if not variants:
+        return []
+    name_set = {v.strip().lower() for v in variants}
+    return [a for a in articles if _matches_symbol(a, name_set)]
+
+
+def _mention_count(articles_for_sym: list[dict]) -> tuple[int, int]:
+    """Return (count_24h, count_7d) over the symbol-filtered articles."""
     now = datetime.utcnow()
-    c24 = 0
-    c7d = 0
-    needles = [re.escape(symbol)] + [re.escape(k) for k in company_keywords if k]
-    pattern = re.compile(r"\b(" + "|".join(needles) + r")\b", re.IGNORECASE)
-    for a in articles:
-        hay = (a.get("title") or "") + " " + (a.get("excerpt") or "") + " " + ((a.get("body") or "")[:2000])
-        if not pattern.search(hay):
-            continue
+    c24 = c7d = 0
+    for a in articles_for_sym:
         c7d += 1
         if _article_age_hours(a, now) <= 24:
             c24 += 1
     return c24, c7d
 
 
-def _decayed_sentiment(articles: list[dict], symbol: str, hours: float | None = None) -> float:
-    """
-    Aggregate decay-weighted sentiment across articles mentioning `symbol`.
-    If hours is set, only articles newer than that count (with decay still applied).
-    """
+def _decayed_sentiment(articles_for_sym: list[dict], hours: float | None = None) -> float:
+    """Aggregate decay-weighted LM sentiment across symbol-filtered articles."""
     now = datetime.utcnow()
-    pattern = re.compile(r"\b" + re.escape(symbol) + r"\b", re.IGNORECASE)
     total = 0.0
-    for a in articles:
-        hay = (a.get("title") or "") + " " + (a.get("excerpt") or "")
-        if not pattern.search(hay):
-            continue
+    for a in articles_for_sym:
         age = _article_age_hours(a, now)
         if hours is not None and age > hours:
             continue
         w = _decay_weight(age)
+        hay = (a.get("title") or "") + " " + (a.get("excerpt") or "")
         total += _sentiment(hay) * w
     return round(total, 2)
+
+
+def _story_buzz(articles_for_sym: list[dict], hours: float = 24.0) -> int:
+    """Count distinct story_ids in the symbol's articles within the window.
+    Proxy for 'how many separate news threads are talking about this stock'."""
+    now = datetime.utcnow()
+    sids = set()
+    for a in articles_for_sym:
+        if _article_age_hours(a, now) > hours:
+            continue
+        sid = a.get("story_id")
+        if sid:
+            sids.add(sid)
+    return len(sids)
 
 
 def _macro_scan(articles: list[dict]) -> dict:
@@ -264,6 +305,61 @@ def _company_from_title(title: str) -> str:
     return title.strip()
 
 
+def _extract_legal_today(articles: list[dict]) -> list[dict]:
+    """Pull legal-category articles published today IST. Light de-dup on title."""
+    today_ist = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+    out, seen_titles = [], set()
+    for a in articles:
+        if (a.get("category") or "") != "legal":
+            continue
+        if (a.get("published_at") or "")[:10] != today_ist:
+            continue
+        title = (a.get("title") or "").strip()
+        if title in seen_titles:
+            continue
+        seen_titles.add(title)
+        out.append({
+            "title": title,
+            "source": a.get("source") or "",
+            "published_at": a.get("published_at") or "",
+            "url": a.get("url") or "",
+            "story_id": a.get("story_id"),
+            "orgs": (a.get("entities") or {}).get("orgs") or [],
+        })
+    return out[:30]
+
+
+def _extract_hot_stories(articles: list[dict]) -> list[dict]:
+    """Top stories last 24h by article-count (proxy for crowd attention).
+    Built locally from articles' story_id field — no extra REST call."""
+    from collections import Counter
+    now = datetime.utcnow()
+    counts: Counter = Counter()
+    sample_titles: dict = {}
+    sample_orgs: dict = {}
+    for a in articles:
+        if _article_age_hours(a, now) > 24:
+            continue
+        sid = a.get("story_id")
+        if not sid:
+            continue
+        counts[sid] += 1
+        if sid not in sample_titles:
+            sample_titles[sid] = (a.get("title") or "")[:140]
+            sample_orgs[sid] = (a.get("entities") or {}).get("orgs") or []
+    out = []
+    for sid, n in counts.most_common(20):
+        if n < 3:
+            break  # only "hot" if >=3 articles
+        out.append({
+            "story_id": sid,
+            "article_count": n,
+            "sample_title": sample_titles.get(sid, ""),
+            "orgs": sample_orgs.get(sid, [])[:5],
+        })
+    return out
+
+
 def _extract_results_filings(articles: list[dict]) -> tuple[list[dict], list[dict]]:
     """Returns (today_results, pending_results) lists. Today = same calendar
     day in IST as 'now'. Both lists are sorted newest first, capped at 50."""
@@ -297,11 +393,13 @@ class NewsSnapshot:
     fetched_at: str
     article_count: int
     macro: dict
-    symbol_mentions: dict       # {symbol: {c24, c7d, sentiment_24h}}
+    symbol_mentions: dict       # {symbol: {c24, c7d, sentiment_24h, sentiment_7d, story_buzz_24h}}
     earnings_titles: list[str]
     status: str                 # 'ok' | 'unavailable' | 'cached'
     today_results: list[dict] = field(default_factory=list)    # NSE/BSE results filed today
     pending_results: list[dict] = field(default_factory=list)  # board-meeting intimations for upcoming results
+    legal_today: list[dict] = field(default_factory=list)      # legal-category articles published today (SEBI/court)
+    hot_stories: list[dict] = field(default_factory=list)      # stories with >=3 articles last 24h
 
 
 def fetch_news_snapshot(symbols: list[str], use_cache: bool = True) -> NewsSnapshot:
@@ -326,18 +424,22 @@ def fetch_news_snapshot(symbols: list[str], use_cache: bool = True) -> NewsSnaps
     macro = _macro_scan(articles)
     symbol_mentions = {}
     for sym in symbols:
-        c24, c7d = _mention_count(articles, sym, [])
-        # Decay-weighted finance sentiment from LM dictionary over last 24h and 7d
-        sent_24h = _decayed_sentiment(articles, sym, hours=24)
-        sent_7d = _decayed_sentiment(articles, sym, hours=None)
+        sym_articles = _articles_for_symbol(articles, sym)
+        c24, c7d = _mention_count(sym_articles)
+        sent_24h = _decayed_sentiment(sym_articles, hours=24)
+        sent_7d = _decayed_sentiment(sym_articles, hours=None)
+        buzz = _story_buzz(sym_articles, hours=24.0)
         symbol_mentions[sym] = {
             "c24": c24, "c7d": c7d,
             "sentiment_24h": sent_24h,
             "sentiment_7d": sent_7d,
+            "story_buzz_24h": buzz,
         }
 
     earnings = _earnings_mentions(articles)
     today_results, pending_results = _extract_results_filings(articles)
+    legal_today = _extract_legal_today(articles)
+    hot_stories = _extract_hot_stories(articles)
 
     snap_data = {
         "fetched_at": datetime.now().isoformat(),
@@ -347,6 +449,8 @@ def fetch_news_snapshot(symbols: list[str], use_cache: bool = True) -> NewsSnaps
         "earnings_titles": earnings,
         "today_results": today_results,
         "pending_results": pending_results,
+        "legal_today": legal_today,
+        "hot_stories": hot_stories,
     }
     _save_cache(snap_data)
     return NewsSnapshot(**snap_data, status="ok")

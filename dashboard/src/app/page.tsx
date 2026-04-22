@@ -1,5 +1,6 @@
 import { getAnalysisData } from '@/lib/data'
 import { LivePriceCard } from '@/components/LivePriceCard'
+import { HomeNewsCard } from '@/components/HomeNewsCard'
 import {
   TrendingUp,
   TrendingDown,
@@ -98,6 +99,9 @@ export default async function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* News flow card */}
+      <HomeNewsCard />
 
       {/* Sectors */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

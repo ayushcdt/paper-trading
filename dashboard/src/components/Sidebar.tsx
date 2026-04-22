@@ -12,7 +12,8 @@ import {
   Brain,
   Briefcase,
   Bell,
-  Eye
+  Eye,
+  Newspaper
 } from 'lucide-react'
 
 const navigation = [
@@ -20,6 +21,7 @@ const navigation = [
   { name: 'Stock Picks', href: '/stocks', icon: TrendingUp },
   { name: 'Paper Trading', href: '/paper-trading', icon: Briefcase },
   { name: 'Alerts', href: '/alerts', icon: Bell },
+  { name: 'News', href: '/news', icon: Newspaper },
   { name: 'News Shadow', href: '/news-shadow', icon: Eye },
   { name: 'Mutual Funds', href: '/mutualfunds', icon: PieChart },
   { name: 'Market Analysis', href: '/market', icon: BarChart3 },
