@@ -372,5 +372,69 @@ def run_full_analysis():
     return combined_data
 
 
+def _record_crash(stage: str, exc: BaseException) -> None:
+    """
+    Write a crash record to data/last_crash.json + dispatch a critical alert.
+    Used as a last-resort guard so the scheduler + dashboard can SEE that a
+    run failed (instead of silently keeping yesterday's data).
+    """
+    import traceback
+    crash = {
+        "stage": stage,
+        "exception": f"{type(exc).__name__}: {exc}",
+        "traceback": traceback.format_exc(),
+        "timestamp": datetime.now().isoformat(),
+    }
+    try:
+        (DATA_DIR / "last_crash.json").write_text(json.dumps(crash, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        requests.post(
+            f"{VERCEL_CONFIG['app_url']}/api/blob?key=pipeline_status",
+            data=json.dumps({"ok": False, **crash}, cls=NumpyEncoder),
+            headers={"Content-Type": "application/json", "x-api-key": VERCEL_CONFIG["secret_key"]},
+            timeout=10,
+        )
+    except Exception:
+        pass
+    try:
+        from alerts.channels import dispatch
+        dispatch(
+            "critical",
+            f"PIPELINE CRASHED at {stage}",
+            f"{crash['exception']} -- see data/last_crash.json and logs/scheduler/",
+        )
+    except Exception:
+        pass
+
+
+def _clear_crash_status() -> None:
+    """Clear local + remote crash markers after a successful run."""
+    crash_path = DATA_DIR / "last_crash.json"
+    if crash_path.exists():
+        try:
+            crash_path.unlink()
+        except Exception:
+            pass
+    try:
+        requests.post(
+            f"{VERCEL_CONFIG['app_url']}/api/blob?key=pipeline_status",
+            data=json.dumps({"ok": True, "timestamp": datetime.now().isoformat()}),
+            headers={"Content-Type": "application/json", "x-api-key": VERCEL_CONFIG["secret_key"]},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    run_full_analysis()
+    try:
+        run_full_analysis()
+        _clear_crash_status()
+    except Exception as e:
+        logger.error(f"FATAL: run_full_analysis raised: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        _record_crash("run_full_analysis", e)
+        raise SystemExit(1)

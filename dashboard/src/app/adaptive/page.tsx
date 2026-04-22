@@ -1,7 +1,7 @@
 import { getBlob } from '@/lib/blob'
 import { Brain, Shield, AlertTriangle, Activity, CheckCircle, XCircle } from 'lucide-react'
 
-export const revalidate = 300
+export const revalidate = 60
 
 interface BacktestV3 {
   generated_at: string

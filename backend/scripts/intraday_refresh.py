@@ -35,20 +35,11 @@ from market_analyzer import analyze_nifty, analyze_banknifty, analyze_vix, analy
 from adaptive.regime import classify_regime, compute_breadth
 from adaptive.targets import compute_status
 from config import VERCEL_CONFIG
+from common.market_hours import is_market_hours
 
-
-MARKET_OPEN  = time(9, 15)
-MARKET_CLOSE = time(15, 30)
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 ALERT_STATE_PATH = DATA_DIR / "alert_state.json"
-
-
-def is_market_hours() -> bool:
-    now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
 def post_blob(key: str, payload):

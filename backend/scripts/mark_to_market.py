@@ -29,17 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from paper.portfolio import PaperPortfolio
 from data_fetcher import get_fetcher
-
-
-MARKET_OPEN  = time(9, 15)
-MARKET_CLOSE = time(15, 30)
-
-
-def is_market_hours() -> bool:
-    now = datetime.now()
-    if now.weekday() >= 5:                   # Sat=5, Sun=6
-        return False
-    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+from common.market_hours import is_market_hours
 
 
 def mark_only():

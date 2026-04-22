@@ -22,7 +22,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -36,27 +36,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 from data_fetcher import get_fetcher, SYMBOL_TOKENS
 from streaming.tick_store import TickStore
+from streaming.paper_marker import get_marker
 from paper.portfolio import PaperPortfolio
 from config import ANGEL_CREDENTIALS
+from common.market_hours import is_market_hours
 
 
 LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 logfile(str(LOG_DIR / "ws.log"), maxBytes=5_000_000, backupCount=3)
 
-MARKET_OPEN  = dtime(9, 15)
-MARKET_CLOSE = dtime(15, 30)
-
 # Static symbols to always subscribe to
 STATIC_INDICES = ["NIFTY", "BANKNIFTY", "INDIAVIX"]
 STATIC_SECTORS = [s for s in SYMBOL_TOKENS if s.startswith("NIFTY_")]
-
-
-def is_market_hours() -> bool:
-    now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
 def build_subscription_list(extra_symbols: list[str]) -> list[dict]:
@@ -81,7 +73,16 @@ def build_subscription_list(extra_symbols: list[str]) -> list[dict]:
 
 
 def token_to_symbol() -> dict[str, str]:
-    return {v: k for k, v in SYMBOL_TOKENS.items()}
+    """Prefer canonical short names over sector-prefixed aliases when tokens collide."""
+    priority = {"BANKNIFTY": 10, "NIFTY": 10, "INDIAVIX": 10}
+    mapping: dict[str, str] = {}
+    for sym, tok in SYMBOL_TOKENS.items():
+        if tok in mapping:
+            if priority.get(sym, 0) > priority.get(mapping[tok], 0):
+                mapping[tok] = sym
+        else:
+            mapping[tok] = sym
+    return mapping
 
 
 class StreamerState:
@@ -91,29 +92,69 @@ class StreamerState:
         self.ws: SmartWebSocketV2 | None = None
         self.subscribed_tokens: set[str] = set()
         self.last_login_date = None
+        self.last_tick_at: float = 0.0     # epoch seconds of most recent tick received
 
 
 state = StreamerState()
 
 
+# Silent-stall watchdog: if we haven't received any tick in STALL_THRESHOLD_SEC
+# during market hours, force the WebSocket closed so main_loop reconnects.
+STALL_THRESHOLD_SEC = 120
+WATCHDOG_INTERVAL_SEC = 30
+
+
+def _stall_watchdog():
+    while True:
+        time.sleep(WATCHDOG_INTERVAL_SEC)
+        if not is_market_hours() or state.ws is None or state.last_tick_at == 0:
+            continue
+        age = time.time() - state.last_tick_at
+        if age > STALL_THRESHOLD_SEC:
+            logger.warning(f"STALL DETECTED: no ticks in {age:.0f}s -- forcing WS close to trigger reconnect")
+            try:
+                state.ws.close_connection()
+            except Exception as e:
+                logger.warning(f"close_connection failed: {e}")
+
+
 def _ensure_login():
-    """Login if needed; re-login if tokens are a day old."""
+    """Login if needed; re-login if tokens are a day old. Captures tokens from session response."""
     today = datetime.now().date()
     if state.last_login_date == today and state.ws is not None:
         return True
-    fetcher = get_fetcher()
-    if not fetcher.login():
-        logger.error("Angel login failed")
+
+    from SmartApi import SmartConnect
+    import pyotp
+    try:
+        api = SmartConnect(api_key=ANGEL_CREDENTIALS["api_key"])
+        totp = pyotp.TOTP(ANGEL_CREDENTIALS["totp_secret"]).now()
+        resp = api.generateSession(
+            clientCode=ANGEL_CREDENTIALS["client_id"],
+            password=ANGEL_CREDENTIALS["pin"],
+            totp=totp,
+        )
+        if not resp.get("status"):
+            logger.error(f"Angel login failed: {resp.get('message')}")
+            return False
+        d = resp["data"]
+        jwt_token = d.get("jwtToken")
+        feed_token = d.get("feedToken")
+        if not jwt_token or not feed_token:
+            logger.error(f"Login returned no tokens: {resp}")
+            return False
+        logger.info(f"Angel logged in; got jwt + feed tokens")
+        state.last_login_date = today
+        state.ws = SmartWebSocketV2(
+            auth_token=jwt_token,
+            api_key=ANGEL_CREDENTIALS["api_key"],
+            client_code=ANGEL_CREDENTIALS["client_id"],
+            feed_token=feed_token,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Login exception: {e}")
         return False
-    state.last_login_date = today
-    # Build WS with fresh tokens
-    state.ws = SmartWebSocketV2(
-        auth_token=fetcher.api.access_token if hasattr(fetcher.api, "access_token") else None,
-        api_key=ANGEL_CREDENTIALS["api_key"],
-        client_code=ANGEL_CREDENTIALS["client_id"],
-        feed_token=fetcher.api.feed_token if hasattr(fetcher.api, "feed_token") else None,
-    )
-    return True
 
 
 def on_data(wsapp, message):
@@ -136,9 +177,15 @@ def on_data(wsapp, message):
             "close": float(message.get("closed_price", 0) or 0) / 100.0,
             "exchange_timestamp": message.get("exchange_timestamp"),
         })
-        # Persist + push throttled
         state.store.persist()
         state.store.push_to_redis()
+        state.last_tick_at = time.time()    # watchdog heartbeat
+        # Live paper portfolio mark -- refreshes P&L + equity in near real-time
+        if ltp > 0:
+            try:
+                get_marker().update_tick(sym, ltp)
+            except Exception as e:
+                logger.debug(f"paper_marker update failed: {e}")
     except Exception as e:
         logger.warning(f"on_data error: {e}")
 
@@ -174,25 +221,31 @@ def subscribe_current():
     if new_tokens or dropped:
         logger.info(f"Subscribing {len(tokens_now)} tokens (new={len(new_tokens)}, dropped={len(dropped)})")
         try:
-            # mode 1 = LTP only (cheapest stream)
-            state.ws.subscribe(correlation_id="artha", mode=1, token_list=subs)
+            # mode 2 = Quote (LTP + OHLC + prev close + volume) -- needed for % change display
+            state.ws.subscribe(correlation_id="artha", mode=2, token_list=subs)
             state.subscribed_tokens = tokens_now
         except Exception as e:
             logger.warning(f"Subscribe failed: {e}")
 
 
 def subscription_refresher():
-    """Every 60s, re-check held positions and add/drop subscriptions."""
+    """Every 60s, re-check held positions + refresh paper marker held list."""
     while True:
         time.sleep(60)
         if is_market_hours() and state.ws is not None:
             subscribe_current()
+            try:
+                get_marker().refresh_held()
+            except Exception as e:
+                logger.debug(f"paper_marker refresh_held failed: {e}")
 
 
 def main_loop():
     logger.info("Artha WS streamer starting")
     refresher = threading.Thread(target=subscription_refresher, daemon=True)
     refresher.start()
+    watchdog = threading.Thread(target=_stall_watchdog, daemon=True)
+    watchdog.start()
 
     while True:
         if not is_market_hours():

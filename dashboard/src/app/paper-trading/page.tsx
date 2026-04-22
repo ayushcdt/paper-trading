@@ -1,38 +1,12 @@
 import { getBlob } from '@/lib/blob'
 import { Briefcase, TrendingUp, TrendingDown, Activity, AlertTriangle, Target, Zap } from 'lucide-react'
+import { LivePaperSnapshot } from '@/components/LivePaperSnapshot'
+import type { PaperSnapshot } from '@/lib/paper'
 
-export const revalidate = 120
-
-interface PaperSnapshot {
-  generated_at: string
-  started_at: string
-  starting_capital: number
-  current_equity: number
-  realized_pnl: number
-  unrealized_pnl: number
-  total_pnl_pct: number
-  open_positions_count: number
-  open_positions: {
-    symbol: string; variant: string; regime_at_entry: string;
-    entry_price: number; qty: number; slot_notional: number;
-    stop_at_entry: number; entry_date: string;
-    current_price: number; unrealized_pnl_inr: number; unrealized_pnl_pct: number;
-  }[]
-  recent_trades: {
-    symbol: string; variant: string; regime: string; action: string;
-    price: number; qty: number; pnl_inr: number | null; pnl_pct: number | null;
-    reason: string; timestamp: string;
-  }[]
-  live_3m_return_by_variant: Record<string, number>
-  equity_curve: { date: string; equity: number; realized_cum: number; unrealized: number }[]
-  target_status?: {
-    monthly:   { period: string; target_pct: number; actual_pct: number; on_track: boolean }
-    quarterly: { period: string; target_pct: number; actual_pct: number; on_track: boolean }
-    annual:    { period: string; target_pct: number; actual_pct: number; on_track: boolean }
-    escalation_level: number
-    months_under_target: number
-  }
-}
+// SSR fallback only — LivePaperSnapshot client overrides with 10s polling
+// during market hours via LiveDataProvider. 60s matches the rest of the
+// "live" pages (/, /market, /stocks, /alerts, /performance, /adaptive).
+export const revalidate = 60
 
 async function loadPaper(): Promise<PaperSnapshot | null> {
   return await getBlob<PaperSnapshot>('paper_portfolio')
@@ -127,83 +101,8 @@ export default async function PaperTradingPage() {
         </div>
       )}
 
-      {/* Hero metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="card">
-          <div className="text-sm text-gray-500 mb-1">Current equity</div>
-          <div className="text-3xl font-bold text-gray-900">{fmtInr(snap.current_equity)}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 mb-1">Total P&L</div>
-          <div className={`text-3xl font-bold ${up ? 'text-green-600' : 'text-red-600'}`}>
-            {up ? '+' : ''}{snap.total_pnl_pct.toFixed(2)}%
-          </div>
-          <div className="text-xs text-gray-400 mt-1">{fmtInr(snap.current_equity - snap.starting_capital)}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 mb-1">Realized</div>
-          <div className={`text-2xl font-bold ${snap.realized_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {fmtInr(snap.realized_pnl)}
-          </div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 mb-1">Unrealized</div>
-          <div className={`text-2xl font-bold ${snap.unrealized_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {fmtInr(snap.unrealized_pnl)}
-          </div>
-          <div className="text-xs text-gray-400 mt-1">{snap.open_positions_count} open positions</div>
-        </div>
-      </div>
-
-      {/* Open positions */}
-      <div className="card">
-        <h3 className="card-header flex items-center gap-2">
-          <Activity className="w-5 h-5 text-blue-500" />
-          Open positions ({snap.open_positions_count})
-        </h3>
-        {snap.open_positions.length === 0 ? (
-          <p className="text-sm text-gray-500">
-            No open positions. System is in cash — typically because regime is BEAR, kill switch is active, or no picks met criteria.
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-xs uppercase text-gray-500 border-b border-gray-200">
-                <tr>
-                  <th className="text-left py-2">Symbol</th>
-                  <th className="text-left">Variant</th>
-                  <th className="text-right">Entry</th>
-                  <th className="text-right">Current</th>
-                  <th className="text-right">Qty</th>
-                  <th className="text-right">P&L ₹</th>
-                  <th className="text-right">P&L %</th>
-                  <th className="text-right">Stop</th>
-                  <th className="text-left pl-4">Entry date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snap.open_positions.map((p, i) => (
-                  <tr key={i} className="border-b border-gray-50">
-                    <td className="py-2 font-medium">{p.symbol}</td>
-                    <td className="text-gray-600">{p.variant}</td>
-                    <td className="text-right">₹{p.entry_price.toFixed(2)}</td>
-                    <td className="text-right">₹{p.current_price.toFixed(2)}</td>
-                    <td className="text-right">{p.qty}</td>
-                    <td className={`text-right font-medium ${p.unrealized_pnl_inr >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {fmtInr(p.unrealized_pnl_inr)}
-                    </td>
-                    <td className={`text-right ${p.unrealized_pnl_pct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {p.unrealized_pnl_pct >= 0 ? '+' : ''}{p.unrealized_pnl_pct.toFixed(2)}%
-                    </td>
-                    <td className="text-right text-gray-500">₹{p.stop_at_entry.toFixed(2)}</td>
-                    <td className="pl-4 text-xs text-gray-500">{new Date(p.entry_date).toLocaleDateString('en-IN')}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      {/* Hero metrics + open positions -- LIVE via LiveDataProvider (polls /api/live every 10s) */}
+      <LivePaperSnapshot fallback={snap} />
 
       {/* Variant live P&L */}
       {Object.keys(snap.live_3m_return_by_variant).length > 0 && (

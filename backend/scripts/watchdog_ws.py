@@ -10,23 +10,22 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from logzero import logger
 
-LIVE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "live_ticks.json"
+from common.market_hours import is_market_hours
 
-MARKET_OPEN = dtime(9, 15)
-MARKET_CLOSE = dtime(15, 30)
+LIVE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "live_ticks.json"
 
 
 def main():
-    now = datetime.now()
-    if now.weekday() >= 5 or not (MARKET_OPEN <= now.time() <= MARKET_CLOSE):
+    if not is_market_hours():
         return
+    now = datetime.now()
 
     if not LIVE_PATH.exists():
         logger.warning("No live_ticks.json -- WS not producing any data")

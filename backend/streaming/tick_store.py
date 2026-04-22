@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -39,13 +39,13 @@ class TickStore:
         with self._lock:
             self._ticks[symbol] = {
                 **payload,
-                "received_at": datetime.now().isoformat(),
+                "received_at": datetime.now(timezone.utc).isoformat(),
             }
 
     def snapshot(self) -> dict:
         with self._lock:
             return {
-                "generated_at": datetime.now().isoformat(),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "tick_count": len(self._ticks),
                 "ticks": dict(self._ticks),
             }

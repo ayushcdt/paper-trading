@@ -33,3 +33,7 @@ Thumbs.db
 .vscode/
 .idea/
 .claude/
+
+# TS incremental build cache
+tsconfig.tsbuildinfo
+**/tsconfig.tsbuildinfo

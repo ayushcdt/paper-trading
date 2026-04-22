@@ -236,8 +236,12 @@ class AngelDataFetcher:
                     data["data"],
                     columns=["Date", "Open", "High", "Low", "Close", "Volume"]
                 )
+                # Normalize to tz-naive -- Angel returns tz-aware IST timestamps
+                # but the DB cache returns tz-naive. Mixing these breaks pandas
+                # comparisons downstream (see variants._latest_idx).
                 df["Date"] = pd.to_datetime(df["Date"])
-                # Persist daily bars to DB so subsequent calls are free
+                if getattr(df["Date"].dtype, "tz", None) is not None:
+                    df["Date"] = df["Date"].dt.tz_localize(None)
                 if interval == "ONE_DAY" and not df.empty:
                     try:
                         from data_store import upsert_bars

@@ -1,7 +1,9 @@
 import { getBlob } from '@/lib/blob'
 import { Eye, AlertTriangle, TrendingUp, TrendingDown, Info } from 'lucide-react'
 
-export const revalidate = 300
+// Shadow log is a research artefact updated daily — 600s matches /backtest
+// (the other "static research" page) and reduces redundant Redis reads.
+export const revalidate = 600
 
 interface ShadowEntry {
   symbol: string

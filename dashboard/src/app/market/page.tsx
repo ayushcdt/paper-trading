@@ -1,5 +1,6 @@
 import { getAnalysisData } from '@/lib/data'
 import MacroSection from '@/components/MacroSection'
+import { LivePriceCard } from '@/components/LivePriceCard'
 import {
   TrendingUp,
   TrendingDown,
@@ -27,58 +28,40 @@ export default async function MarketPage() {
         </p>
       </div>
 
-      {/* Indices */}
+      {/* Indices -- LIVE */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Nifty 50 */}
-        <div className="card">
-          <h3 className="text-sm font-medium text-gray-500 mb-2">Nifty 50</h3>
-          <div className="flex items-end gap-3 mb-4">
-            <span className="text-3xl font-bold">{nifty.value.toLocaleString('en-IN')}</span>
-            <span className={`flex items-center text-sm font-medium pb-1 ${
-              nifty.change_pct >= 0 ? 'text-green-600' : 'text-red-600'
+        <LivePriceCard
+          symbol="NIFTY"
+          label="Nifty 50"
+          fallbackLtp={nifty.value}
+          suffixLine={
+            <span className={`inline-block badge ${
+              nifty.trend.includes('BULLISH') ? 'badge-green' :
+              nifty.trend.includes('BEARISH') ? 'badge-red' : 'badge-yellow'
             }`}>
-              {nifty.change_pct >= 0 ? '+' : ''}{nifty.change_pct.toFixed(2)}%
+              {nifty.trend}
             </span>
-          </div>
-          <div className={`inline-block badge ${
-            nifty.trend.includes('BULLISH') ? 'badge-green' :
-            nifty.trend.includes('BEARISH') ? 'badge-red' : 'badge-yellow'
-          }`}>
-            {nifty.trend}
-          </div>
-        </div>
-
-        {/* Bank Nifty */}
-        <div className="card">
-          <h3 className="text-sm font-medium text-gray-500 mb-2">Bank Nifty</h3>
-          <div className="flex items-end gap-3 mb-4">
-            <span className="text-3xl font-bold">{banknifty.value.toLocaleString('en-IN')}</span>
-            <span className={`flex items-center text-sm font-medium pb-1 ${
-              banknifty.change_pct >= 0 ? 'text-green-600' : 'text-red-600'
+          }
+        />
+        <LivePriceCard
+          symbol="BANKNIFTY"
+          label="Bank Nifty"
+          fallbackLtp={banknifty.value}
+          suffixLine={
+            <span className={`inline-block badge ${
+              banknifty.trend.includes('BULLISH') ? 'badge-green' :
+              banknifty.trend.includes('BEARISH') ? 'badge-red' : 'badge-yellow'
             }`}>
-              {banknifty.change_pct >= 0 ? '+' : ''}{banknifty.change_pct.toFixed(2)}%
+              {banknifty.trend}
             </span>
-          </div>
-          <div className={`inline-block badge ${
-            banknifty.trend.includes('BULLISH') ? 'badge-green' :
-            banknifty.trend.includes('BEARISH') ? 'badge-red' : 'badge-yellow'
-          }`}>
-            {banknifty.trend}
-          </div>
-        </div>
-
-        {/* VIX */}
-        <div className="card">
-          <h3 className="text-sm font-medium text-gray-500 mb-2">India VIX</h3>
-          <div className="flex items-end gap-3 mb-4">
-            <span className="text-3xl font-bold">{vix.value.toFixed(2)}</span>
-            <Activity className={`w-5 h-5 pb-1 ${
-              vix.value < 15 ? 'text-green-500' :
-              vix.value < 20 ? 'text-yellow-500' : 'text-red-500'
-            }`} />
-          </div>
-          <p className="text-sm text-gray-600">{vix.message}</p>
-        </div>
+          }
+        />
+        <LivePriceCard
+          symbol="INDIAVIX"
+          label="India VIX"
+          fallbackLtp={vix.value}
+          suffixLine={<p className="text-sm text-gray-600">{vix.message}</p>}
+        />
       </div>
 
       {/* Technical Status */}

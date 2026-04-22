@@ -2,7 +2,7 @@ import { getAnalysisData } from '@/lib/data'
 import { buildHistoryTimeline, buildPickPerformance } from '@/lib/history'
 import { TrendingUp, TrendingDown, Calendar, Award, AlertCircle } from 'lucide-react'
 
-export const revalidate = 300 // 5 min
+export const revalidate = 60
 
 function stanceColor(stance: string) {
   if (stance.includes('BULLISH')) return 'text-green-700 bg-green-50'

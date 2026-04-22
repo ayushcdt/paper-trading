@@ -1,4 +1,5 @@
 import { getAnalysisData } from '@/lib/data'
+import { LivePriceCard } from '@/components/LivePriceCard'
 import {
   TrendingUp,
   TrendingDown,
@@ -40,48 +41,34 @@ export default async function Dashboard() {
 
       {/* Market Overview Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {/* Nifty 50 */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm font-medium text-gray-500">Nifty 50</span>
+        {/* Nifty 50 -- LIVE */}
+        <LivePriceCard
+          symbol="NIFTY"
+          label="Nifty 50"
+          fallbackLtp={nifty.value}
+          trendBadge={
             <span className={`badge ${nifty.change_pct >= 0 ? 'badge-green' : 'badge-red'}`}>
               {nifty.trend}
             </span>
-          </div>
-          <div className="flex items-end gap-2">
-            <span className="text-3xl font-bold text-gray-900">
-              {nifty.value.toLocaleString('en-IN')}
-            </span>
-            <span className={`flex items-center text-sm font-medium ${
-              nifty.change_pct >= 0 ? 'text-green-600' : 'text-red-600'
-            }`}>
-              {nifty.change_pct >= 0 ? <TrendingUp className="w-4 h-4 mr-1" /> : <TrendingDown className="w-4 h-4 mr-1" />}
-              {nifty.change_pct >= 0 ? '+' : ''}{nifty.change_pct.toFixed(2)}%
-            </span>
-          </div>
-          <div className="mt-3 text-sm text-gray-500">
-            Support: {nifty.support[0]?.toLocaleString()} | Resistance: {nifty.resistance[0]?.toLocaleString()}
-          </div>
-        </div>
+          }
+          suffixLine={`Support: ${nifty.support[0]?.toLocaleString()} | Resistance: ${nifty.resistance[0]?.toLocaleString()}`}
+        />
 
-        {/* VIX */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm font-medium text-gray-500">India VIX</span>
-            <Activity className="w-5 h-5 text-gray-400" />
-          </div>
-          <div className="text-3xl font-bold text-gray-900">
-            {vix.value.toFixed(2)}
-          </div>
-          <div className="mt-3">
+        {/* VIX -- LIVE */}
+        <LivePriceCard
+          symbol="INDIAVIX"
+          label="India VIX"
+          fallbackLtp={vix.value}
+          suffixLine={
             <span className={`badge ${
               vix.value < 15 ? 'badge-green' :
               vix.value < 20 ? 'badge-yellow' : 'badge-red'
             }`}>
               {vix.interpretation.replace('_', ' ')}
             </span>
-          </div>
-        </div>
+          }
+        />
+
 
         {/* Market Stance */}
         <div className="card">

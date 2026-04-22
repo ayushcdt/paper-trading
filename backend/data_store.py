@@ -102,7 +102,10 @@ def get_bars(symbol: str, n_days: int | None = None, since: str | None = None) -
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+    # Always tz-naive to stay consistent with data_fetcher's Angel-fallback path
     df["Date"] = pd.to_datetime(df["Date"])
+    if getattr(df["Date"].dtype, "tz", None) is not None:
+        df["Date"] = df["Date"].dt.tz_localize(None)
     return df
 
 

@@ -244,6 +244,25 @@ export async function getAnalysisData(): Promise<AnalysisData> {
   return demoData
 }
 
+export interface PipelineStatus {
+  ok: boolean
+  stage?: string
+  exception?: string
+  traceback?: string
+  timestamp?: string
+}
+
+export async function getPipelineStatus(): Promise<PipelineStatus | null> {
+  try {
+    if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+      return await redis.get<PipelineStatus>('blob:pipeline_status')
+    }
+  } catch (error) {
+    console.error('Error fetching pipeline_status:', error)
+  }
+  return null
+}
+
 export async function setAnalysisData(data: AnalysisData): Promise<boolean> {
   try {
     await redis.set('analysis', data)
