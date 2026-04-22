@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -59,6 +59,28 @@ MACRO_KEYWORDS = {
 EARNINGS_KEYWORDS = ["Q1 results", "Q2 results", "Q3 results", "Q4 results",
                      "quarterly results", "earnings", "profit after tax", "net profit"]
 
+# Phrases that indicate an exchange filing IS an actual results announcement
+# (the numbers have been filed) versus housekeeping. Body match preferred over
+# title because NSE/BSE titles are templated ("Outcome of Board Meeting").
+RESULTS_FILED_BODY_PATTERNS = [
+    r"submitted.*?financial result",
+    r"audited.*?financial result",
+    r"unaudited.*?financial result",
+    r"financial result.*?for the (quarter|year|period)",
+    r"earnings call",
+]
+RESULTS_FILED_TITLE_PATTERNS = [
+    r"audited financial result",
+    r"unaudited financial result",
+    r"earnings call transcript",
+]
+# Phrases on board-meeting intimations that pre-announce upcoming results
+RESULTS_INTIMATION_PATTERNS = [
+    r"board meeting intimation.*?(financial result|audited|unaudited)",
+    r"approve.*?financial result",
+    r"consider.*?financial result",
+]
+
 
 # ---------- Cache ------------------------------------------------------------
 
@@ -98,7 +120,7 @@ def _fetch_recent_articles(hours: int = 168) -> list[dict]:
         url = f"{SUPABASE_URL}/rest/v1/articles"
         params = {
             "select": "id,title,excerpt,body,source,category,published_at,url",
-            "category": "in.(business,wire)",
+            "category": "in.(business,wire,filings)",
             "published_at": f"gte.{cutoff}",
             "order": "published_at.desc",
             "limit": "2000",
@@ -212,6 +234,62 @@ def _earnings_mentions(articles: list[dict]) -> list[str]:
     return list(out)
 
 
+def _classify_filing(article: dict) -> Optional[str]:
+    """For a category=filings article, return 'filed' | 'intimation' | None."""
+    if (article.get("category") or "") != "filings":
+        return None
+    title = (article.get("title") or "").lower()
+    body = (article.get("body") or "").lower()[:600]
+    for p in RESULTS_INTIMATION_PATTERNS:
+        if re.search(p, title) or re.search(p, body):
+            return "intimation"
+    for p in RESULTS_FILED_TITLE_PATTERNS:
+        if re.search(p, title):
+            return "filed"
+    for p in RESULTS_FILED_BODY_PATTERNS:
+        if re.search(p, body):
+            return "filed"
+    return None
+
+
+def _company_from_title(title: str) -> str:
+    """NSE/BSE titles look like 'Tata Elxsi Ltd ? Audited Financial Results...'.
+    Strip from the first dash/em-dash onward to get the company portion."""
+    if not title:
+        return ""
+    # The em-dash gets normalized to '?' in DB; handle both.
+    for sep in [" \u2014 ", " \u2013 ", " - ", " ? ", "?"]:
+        if sep in title:
+            return title.split(sep, 1)[0].strip()
+    return title.strip()
+
+
+def _extract_results_filings(articles: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Returns (today_results, pending_results) lists. Today = same calendar
+    day in IST as 'now'. Both lists are sorted newest first, capped at 50."""
+    today_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    today_str = today_ist.strftime("%Y-%m-%d")
+    today, pending = [], []
+    for a in articles:
+        kind = _classify_filing(a)
+        if not kind:
+            continue
+        pub = (a.get("published_at") or "")[:10]
+        entry = {
+            "kind": kind,
+            "company": _company_from_title(a.get("title") or ""),
+            "title": a.get("title") or "",
+            "source": a.get("source") or "",
+            "published_at": a.get("published_at") or "",
+            "url": a.get("url") or "",
+        }
+        if kind == "filed" and pub == today_str:
+            today.append(entry)
+        elif kind == "intimation":
+            pending.append(entry)
+    return today[:50], pending[:50]
+
+
 # ---------- Public API --------------------------------------------------------
 
 @dataclass
@@ -222,6 +300,8 @@ class NewsSnapshot:
     symbol_mentions: dict       # {symbol: {c24, c7d, sentiment_24h}}
     earnings_titles: list[str]
     status: str                 # 'ok' | 'unavailable' | 'cached'
+    today_results: list[dict] = field(default_factory=list)    # NSE/BSE results filed today
+    pending_results: list[dict] = field(default_factory=list)  # board-meeting intimations for upcoming results
 
 
 def fetch_news_snapshot(symbols: list[str], use_cache: bool = True) -> NewsSnapshot:
@@ -257,6 +337,7 @@ def fetch_news_snapshot(symbols: list[str], use_cache: bool = True) -> NewsSnaps
         }
 
     earnings = _earnings_mentions(articles)
+    today_results, pending_results = _extract_results_filings(articles)
 
     snap_data = {
         "fetched_at": datetime.now().isoformat(),
@@ -264,6 +345,8 @@ def fetch_news_snapshot(symbols: list[str], use_cache: bool = True) -> NewsSnaps
         "macro": macro,
         "symbol_mentions": symbol_mentions,
         "earnings_titles": earnings,
+        "today_results": today_results,
+        "pending_results": pending_results,
     }
     _save_cache(snap_data)
     return NewsSnapshot(**snap_data, status="ok")

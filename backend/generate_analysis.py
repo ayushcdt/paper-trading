@@ -292,8 +292,13 @@ def run_full_analysis():
             "macro": news_snap.macro,
             "symbol_mentions": news_snap.symbol_mentions,
             "earnings_titles": news_snap.earnings_titles[:10],
+            "today_results": news_snap.today_results,
+            "pending_results": news_snap.pending_results,
         }
-        logger.info(f"News: {news_snap.article_count} articles, status={news_snap.status}")
+        logger.info(
+            f"News: {news_snap.article_count} articles, status={news_snap.status}, "
+            f"results_today={len(news_snap.today_results)}, pending_intimations={len(news_snap.pending_results)}"
+        )
     except Exception as e:
         logger.warning(f"News fetch failed (non-fatal): {e}")
         news_block = {"status": "error", "error": str(e)}

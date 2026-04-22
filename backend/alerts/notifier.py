@@ -191,6 +191,40 @@ def check_and_alert(
                 if f"bad_news_{sym}" in prev:
                     prev.pop(f"bad_news_{sym}")
 
+    # ---- Results filings on held positions (Phase 1: substring match;
+    # Phase 2 will use proper SYMBOL_TO_NAMES map). Conservative match: only
+    # alert when a single token of the symbol appears verbatim in the title.
+    if news_snap and paper_snap:
+        held = {p["symbol"] for p in paper_snap.get("open_positions", [])}
+        today_filings = getattr(news_snap, "today_results", None) or []
+        pending = getattr(news_snap, "pending_results", None) or []
+        for sym in held:
+            sym_token = sym.split("-")[0].split("&")[0].upper()
+            if len(sym_token) < 4:  # avoid spurious 3-letter matches like "ITC" matching "WITCHING"
+                continue
+            for f in today_filings:
+                title_upper = (f.get("title") or "").upper()
+                company_upper = (f.get("company") or "").upper()
+                if sym_token in title_upper or sym_token in company_upper:
+                    key = f"results_filed_{sym}_{f.get('url','')[:60]}"
+                    if not prev.get(key):
+                        dispatch("info",
+                                 f"Results filed on held: {sym}",
+                                 f"{f.get('company','?')} -- {f.get('source','?')}\n{f.get('title','')[:200]}\n{f.get('url','')}")
+                        alerts_fired += 1
+                        prev[key] = now_iso
+            for f in pending:
+                title_upper = (f.get("title") or "").upper()
+                company_upper = (f.get("company") or "").upper()
+                if sym_token in title_upper or sym_token in company_upper:
+                    key = f"results_intimation_{sym}_{f.get('url','')[:60]}"
+                    if not prev.get(key):
+                        dispatch("info",
+                                 f"Upcoming results: {sym}",
+                                 f"{f.get('company','?')} -- {f.get('source','?')}\n{f.get('title','')[:200]}")
+                        alerts_fired += 1
+                        prev[key] = now_iso
+
     prev["updated_at"] = now_iso
     _save_state(prev)
     return alerts_fired
