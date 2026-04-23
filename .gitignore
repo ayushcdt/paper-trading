@@ -5,8 +5,13 @@ backend/config.py
 !**/.env.example
 .vercel/
 
-# Generated data
-data/
+# Generated data (ignore contents of data/, but whitelist universe config)
+data/*
+data/history/
+# Universe + sector definitions — config, track in git
+!data/extended_tokens.json
+!data/nifty500_sectors.json
+!data/nifty500_unresolved.json
 logs/
 backend/logs/
 *.db
