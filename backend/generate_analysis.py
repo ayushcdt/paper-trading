@@ -307,6 +307,37 @@ def run_full_analysis():
         logger.warning(f"News fetch failed (non-fatal): {e}")
         news_block = {"status": "error", "error": str(e)}
 
+    # Phase 3B/C: theme detection + hybrid shadow scoring (does not modify picks)
+    overlay_block = {"status": "skipped"}
+    try:
+        from news.themes import detect_active_themes
+        from adaptive.hybrid_overlay import apply_hybrid_overlay, summary_for_blob
+        from dataclasses import asdict
+        # Pull raw articles from cache for theme detection (avoids double-fetch)
+        from news.feed import _load_cache as _news_cache
+        cache = _news_cache() or {}
+        raw_articles = []  # cache stores aggregates, not raw articles. Use snap path:
+        # Use cached raw fetch via private import — falls back to empty if unavailable.
+        try:
+            from news.feed import _fetch_recent_articles
+            raw_articles = _fetch_recent_articles(hours=72)  # 3-day window for theme detection
+        except Exception:
+            raw_articles = []
+        active_themes = detect_active_themes(raw_articles) if raw_articles else []
+        active_themes_payload = [asdict(t) for t in active_themes]
+        picks_for_overlay = stocks_data.get("picks", []) or []
+        _picks_returned, decisions = apply_hybrid_overlay(picks_for_overlay, news_snap, active_themes_payload)
+        overlay_block = summary_for_blob(decisions, active_themes_payload)
+        logger.info(
+            f"Hybrid overlay: mode={overlay_block.get('mode')}, "
+            f"active_themes={len(active_themes_payload)}, "
+            f"decisions={len(decisions)}"
+        )
+    except Exception as e:
+        import traceback
+        logger.warning(f"Hybrid overlay failed (non-fatal): {e}\n{traceback.format_exc()[:300]}")
+        overlay_block = {"status": "error", "error": str(e)}
+
     # Combine all data
     combined_data = {
         "generated_at": datetime.now().isoformat(),
@@ -314,6 +345,7 @@ def run_full_analysis():
         "stocks": stocks_data,
         "mutualfunds": mf_data,
         "news": news_block,
+        "hybrid_overlay": overlay_block,
     }
 
     # Save combined locally

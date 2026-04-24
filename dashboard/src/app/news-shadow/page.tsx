@@ -1,5 +1,39 @@
 import { getBlob } from '@/lib/blob'
-import { Eye, AlertTriangle, TrendingUp, TrendingDown, Info } from 'lucide-react'
+import { getAnalysisData } from '@/lib/data'
+import { Eye, AlertTriangle, TrendingUp, TrendingDown, Info, Flame, Activity } from 'lucide-react'
+
+interface HybridDecision {
+  timestamp: string
+  symbol: string
+  v3_score: number
+  hybrid_score: number
+  adjustment_pct: number
+  reasons: string[]
+  sector_tilts_applied: Record<string, number>
+  news_sentiment_24h: number
+  article_count_24h: number
+  story_buzz_24h: number
+  active_theme_ids: string[]
+  mode: string
+}
+
+interface ActiveTheme {
+  theme_id: string
+  score: number
+  matched_articles: number
+  distinct_sources: number
+  sample_titles: string[]
+  positive_for: string[]
+  negative_for: string[]
+}
+
+interface HybridOverlayBlock {
+  status?: string
+  active_themes?: ActiveTheme[]
+  decisions?: HybridDecision[]
+  decisions_count?: number
+  mode?: string
+}
 
 // Shadow log is a research artefact updated daily — 600s matches /backtest
 // (the other "static research" page) and reduces redundant Redis reads.
@@ -19,22 +53,30 @@ interface ShadowEntry {
 }
 
 export default async function NewsShadowPage() {
-  const log = (await getBlob<ShadowEntry[]>('news_shadow_log')) ?? []
-  const reversed = [...log].reverse()
+  const [log, analysis] = await Promise.all([
+    getBlob<ShadowEntry[]>('news_shadow_log'),
+    getAnalysisData() as any,
+  ])
+  const safeLog = log ?? []
+  const reversed = [...safeLog].reverse()
+  const overlay: HybridOverlayBlock = (analysis?.hybrid_overlay ?? {}) as HybridOverlayBlock
+  const activeThemes = overlay.active_themes ?? []
+  const recentDecisions = overlay.decisions ?? []
+  const decisionCount = overlay.decisions_count ?? recentDecisions.length
 
   // Summary metrics
-  const blacklists = log.filter(e => e.action === 'BLACKLIST').length
-  const boosts = log.filter(e => e.action === 'ADJUST' && (e.adjustment_pct ?? 0) > 0).length
-  const penalties = log.filter(e => e.action === 'ADJUST' && (e.adjustment_pct ?? 0) < 0).length
-  const firstTs = log.length ? log[0].timestamp : null
-  const lastTs = log.length ? log[log.length - 1].timestamp : null
+  const blacklists = safeLog.filter(e => e.action === 'BLACKLIST').length
+  const boosts = safeLog.filter(e => e.action === 'ADJUST' && (e.adjustment_pct ?? 0) > 0).length
+  const penalties = safeLog.filter(e => e.action === 'ADJUST' && (e.adjustment_pct ?? 0) < 0).length
+  const firstTs = safeLog.length ? safeLog[0].timestamp : null
+  const lastTs = safeLog.length ? safeLog[safeLog.length - 1].timestamp : null
   const daysRunning = firstTs
     ? Math.max(1, Math.round((Date.now() - new Date(firstTs).getTime()) / (1000 * 60 * 60 * 24)))
     : 0
 
   // Per-symbol net adjustment
   const bySymbol: Record<string, { adjustments: number[]; blacklists: number; lastSeen: string }> = {}
-  for (const e of log) {
+  for (const e of safeLog) {
     if (!bySymbol[e.symbol]) bySymbol[e.symbol] = { adjustments: [], blacklists: 0, lastSeen: e.timestamp }
     bySymbol[e.symbol].lastSeen = e.timestamp
     if (e.action === 'BLACKLIST') bySymbol[e.symbol].blacklists += 1
@@ -53,7 +95,7 @@ export default async function NewsShadowPage() {
     .sort((a, b) => b.count - a.count)
     .slice(0, 30)
 
-  const mode = log[log.length - 1]?.mode ?? 'shadow'
+  const mode = safeLog[safeLog.length - 1]?.mode ?? 'shadow'
 
   return (
     <div className="space-y-8">
@@ -69,7 +111,91 @@ export default async function NewsShadowPage() {
         </p>
       </div>
 
-      {log.length === 0 && (
+      {/* Active themes today (from hybrid_overlay block) */}
+      <div className="card">
+        <h3 className="card-header flex items-center gap-2">
+          <Flame className="w-5 h-5 text-amber-600" />
+          Active themes detected ({activeThemes.length})
+          <span className="ml-auto text-xs text-gray-500">overlay mode: {overlay.mode ?? 'shadow'}</span>
+        </h3>
+        {activeThemes.length === 0 ? (
+          <p className="text-sm text-gray-500">No themes met the multi-source confirmation threshold this run.</p>
+        ) : (
+          <div className="space-y-3">
+            {activeThemes.map((t, i) => (
+              <div key={i} className="border-l-4 border-amber-400 pl-3 py-1">
+                <div className="flex items-baseline gap-3">
+                  <span className="font-mono text-sm font-semibold text-gray-900">{t.theme_id}</span>
+                  <span className="text-xs text-gray-500">
+                    score {t.score} · {t.matched_articles} arts · {t.distinct_sources} sources
+                  </span>
+                </div>
+                <div className="text-xs text-gray-600 mt-1">
+                  {t.positive_for.length > 0 && (
+                    <span className="mr-2">+ for: <span className="text-green-700">{t.positive_for.join(', ')}</span></span>
+                  )}
+                  {t.negative_for.length > 0 && (
+                    <span>- for: <span className="text-red-700">{t.negative_for.join(', ')}</span></span>
+                  )}
+                </div>
+                {t.sample_titles.slice(0, 2).map((s, j) => (
+                  <div key={j} className="text-xs text-gray-500 truncate mt-0.5">{s}</div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Recent shadow decisions table */}
+      {recentDecisions.length > 0 && (
+        <div className="card">
+          <h3 className="card-header flex items-center gap-2">
+            <Activity className="w-5 h-5 text-indigo-600" />
+            Hybrid score decisions ({decisionCount} total this run)
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs uppercase text-gray-500 border-b border-gray-200">
+                <tr>
+                  <th className="text-left py-2">Symbol</th>
+                  <th className="text-right">V3 score</th>
+                  <th className="text-right">Hybrid</th>
+                  <th className="text-right">Δ%</th>
+                  <th className="text-right">Sent 24h</th>
+                  <th className="text-right">Buzz</th>
+                  <th className="text-left pl-4">Reasons</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentDecisions.map((d, i) => (
+                  <tr key={i} className="border-b border-gray-50">
+                    <td className="py-2 font-medium">{d.symbol}</td>
+                    <td className="text-right tabular-nums">{d.v3_score.toFixed(3)}</td>
+                    <td className="text-right tabular-nums">{d.hybrid_score.toFixed(3)}</td>
+                    <td className={`text-right font-medium tabular-nums ${
+                      d.adjustment_pct > 0 ? 'text-green-700' : d.adjustment_pct < 0 ? 'text-red-700' : 'text-gray-500'
+                    }`}>
+                      {d.adjustment_pct >= 0 ? '+' : ''}{d.adjustment_pct.toFixed(1)}%
+                    </td>
+                    <td className={`text-right tabular-nums ${
+                      d.news_sentiment_24h <= -1.5 ? 'text-red-600' : d.news_sentiment_24h >= 1.5 ? 'text-green-600' : 'text-gray-500'
+                    }`}>
+                      {d.news_sentiment_24h >= 0 ? '+' : ''}{d.news_sentiment_24h.toFixed(1)}
+                    </td>
+                    <td className="text-right text-gray-500">{d.story_buzz_24h}</td>
+                    <td className="pl-4 text-xs text-gray-600">
+                      {d.reasons.length > 0 ? d.reasons.slice(0, 2).join(' · ') : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {safeLog.length === 0 && (
         <div className="card bg-yellow-50 border-yellow-200">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-yellow-600 mt-0.5 flex-shrink-0" />
@@ -84,7 +210,7 @@ export default async function NewsShadowPage() {
         </div>
       )}
 
-      {log.length > 0 && (
+      {safeLog.length > 0 && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="card">

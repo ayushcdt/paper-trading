@@ -178,7 +178,13 @@ SYMBOL_TO_NAMES: dict[str, list[str]] = {
 def names_for(symbol: str) -> list[str]:
     """Return matchable name variants for a symbol. Always includes the symbol itself
     if length >= 4 (3-letter symbols cause too many false positives).
-    Returns empty list if symbol unknown — caller should fall back to symbol-only match."""
+    Returns empty list if symbol unknown — caller should fall back to symbol-only match.
+
+    Callers must do EXACT (case-insensitive) match against entity strings, NOT
+    substring `in` checks — substring matching produced ~10% false-positive rate
+    in the MVR.1 audit (e.g., "Bharat Udyog Ltd" matching "Steel Authority of India"
+    via shared substring). See data/research/mvr_findings.md.
+    """
     names = list(SYMBOL_TO_NAMES.get(symbol, []))
     if len(symbol) >= 4 and symbol not in {n.upper() for n in names}:
         names.append(symbol)

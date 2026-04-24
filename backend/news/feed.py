@@ -175,17 +175,24 @@ def _article_orgs(article: dict) -> set[str]:
 
 
 def _matches_symbol(article: dict, name_variants_lower: set[str]) -> bool:
-    """Phase 2: entity-first match. Falls back to title/excerpt substring for
-    raw articles that haven't been entity-extracted yet (lag in pipeline)."""
+    """Entity-first exact match. Falls back to word-boundary regex on title+excerpt
+    for un-enriched articles only (newsapp brain pipeline lag).
+
+    Word-boundary fallback (added after MVR.1 audit) prevents false positives like
+    "ITC" matching "switching", "TCS" matching "TCSE", etc.
+    See data/research/mvr_findings.md.
+    """
     orgs = _article_orgs(article)
     if orgs and orgs & name_variants_lower:
         return True
-    # Fallback: case-insensitive substring on title+excerpt for un-enriched
-    # articles. We deliberately skip body (too noisy for substring match).
+    # Fallback for un-enriched articles only.
     if not orgs:
         hay = ((article.get("title") or "") + " " + (article.get("excerpt") or "")).lower()
         for name in name_variants_lower:
-            if len(name) >= 4 and name in hay:
+            if len(name) < 4:
+                continue
+            # Require word-boundary on both sides; covers names with spaces/punctuation too.
+            if re.search(r"(?<![a-z0-9])" + re.escape(name) + r"(?![a-z0-9])", hay):
                 return True
     return False
 

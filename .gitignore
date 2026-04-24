@@ -12,6 +12,10 @@ data/history/
 !data/extended_tokens.json
 !data/nifty500_sectors.json
 !data/nifty500_unresolved.json
+# Research artefacts — track findings, not raw caches
+!data/research/
+data/research/*.pkl
+data/research/shadow_log.jsonl
 logs/
 backend/logs/
 *.db
