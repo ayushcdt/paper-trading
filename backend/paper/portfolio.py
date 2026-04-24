@@ -90,6 +90,20 @@ class PaperPortfolio:
                     value TEXT
                 );
 
+                -- Pending opens: picks queued during off-hours, waiting for next
+                -- market open to fill at the actual open price (matches AMO mechanics).
+                -- See paper/runner.py + scripts/mark_to_market.py for fill logic.
+                CREATE TABLE IF NOT EXISTS pending_opens (
+                    symbol TEXT PRIMARY KEY,
+                    variant TEXT NOT NULL,
+                    regime_at_entry TEXT,
+                    intended_entry_price REAL NOT NULL,   -- prior close used as gap reference
+                    planned_slot_notional REAL NOT NULL,
+                    stop_at_entry REAL,
+                    queued_at TEXT NOT NULL,
+                    intended_fill_at TEXT NOT NULL        -- ISO of next 09:15 IST
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_trade_variant_date
                     ON trade_log(variant, date);
             """)
@@ -171,13 +185,16 @@ class PaperPortfolio:
         entry_price: float,
         slot_notional: float,
         stop: float,
+        entry_time: Optional[str] = None,
+        reason: str = "new pick",
     ) -> Position:
         qty = max(1, int(slot_notional / entry_price)) if entry_price > 0 else 1
-        now = datetime.now()
+        when_iso = entry_time or datetime.now().isoformat()
+        when_date = when_iso[:10]
         pos = Position(
             symbol=symbol, variant=variant, regime_at_entry=regime,
             entry_price=entry_price, qty=qty, slot_notional=slot_notional,
-            stop_at_entry=stop, entry_date=now.isoformat(),
+            stop_at_entry=stop, entry_date=when_iso,
         )
         with self._conn() as c:
             c.execute(
@@ -187,9 +204,77 @@ class PaperPortfolio:
             )
             c.execute(
                 "INSERT INTO trade_log (symbol, variant, regime, action, price, qty, pnl_inr, pnl_pct, reason, timestamp, date) "
-                "VALUES (?, ?, ?, 'OPEN', ?, ?, 0, 0, 'new pick', ?, ?)",
-                (symbol, variant, regime, entry_price, qty, now.isoformat(), now.strftime("%Y-%m-%d")),
+                "VALUES (?, ?, ?, 'OPEN', ?, ?, 0, 0, ?, ?, ?)",
+                (symbol, variant, regime, entry_price, qty, reason, when_iso, when_date),
             )
+        return pos
+
+    # ---------- Pending opens (Option C: next-day-open execution) -----------
+
+    def queue_pending_open(
+        self,
+        symbol: str,
+        variant: str,
+        regime: str,
+        intended_entry_price: float,
+        planned_slot_notional: float,
+        stop: float,
+        intended_fill_at: str,
+    ) -> None:
+        """Queue a pick for execution at next market open (Option C). Idempotent
+        on symbol -- re-queuing updates the existing row."""
+        now_iso = datetime.now().isoformat()
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO pending_opens "
+                "(symbol, variant, regime_at_entry, intended_entry_price, "
+                " planned_slot_notional, stop_at_entry, queued_at, intended_fill_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (symbol, variant, regime, float(intended_entry_price),
+                 float(planned_slot_notional), float(stop),
+                 now_iso, intended_fill_at),
+            )
+
+    def get_pending_opens(self) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT symbol, variant, regime_at_entry, intended_entry_price, "
+                "planned_slot_notional, stop_at_entry, queued_at, intended_fill_at "
+                "FROM pending_opens ORDER BY queued_at"
+            ).fetchall()
+        cols = ["symbol", "variant", "regime_at_entry", "intended_entry_price",
+                "planned_slot_notional", "stop_at_entry", "queued_at", "intended_fill_at"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def cancel_pending_open(self, symbol: str, reason: str = "cancelled") -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM pending_opens WHERE symbol = ?", (symbol,))
+
+    def execute_pending(
+        self,
+        symbol: str,
+        fill_price: float,
+        fill_time_iso: str,
+    ) -> Optional[Position]:
+        """Move a pending_open into a real position at the given fill price/time.
+        Caller is responsible for gap-guard checks before invoking this."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT variant, regime_at_entry, planned_slot_notional, stop_at_entry "
+                "FROM pending_opens WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        if not row:
+            return None
+        variant, regime, slot, stop = row
+        pos = self.open_position(
+            symbol=symbol, variant=variant, regime=regime or "UNKNOWN",
+            entry_price=float(fill_price), slot_notional=float(slot),
+            stop=float(stop), entry_time=fill_time_iso,
+            reason="filled at next-day open",
+        )
+        with self._conn() as c:
+            c.execute("DELETE FROM pending_opens WHERE symbol = ?", (symbol,))
         return pos
 
     def close_position(self, symbol: str, exit_price: float, reason: str) -> Optional[dict]:

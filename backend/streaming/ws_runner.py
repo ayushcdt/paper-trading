@@ -204,15 +204,23 @@ def on_close(wsapp):
 
 
 def subscribe_current():
-    """Compute current subscription list (indices + sectors + open positions) and subscribe."""
+    """Compute current subscription list and subscribe.
+
+    Subscribes to: static indices/sectors + currently held positions +
+    any pending_opens (so we capture their first-post-open ticks at 09:15
+    for the next-day-open execution model -- see paper/portfolio.py
+    pending_opens table)."""
     if state.ws is None:
         return
     try:
         pf = PaperPortfolio()
         held = pf.get_open_symbols()
+        pending = [p["symbol"] for p in pf.get_pending_opens()]
     except Exception:
         held = []
-    subs = build_subscription_list(held)
+        pending = []
+    extras = sorted(set(held) | set(pending))
+    subs = build_subscription_list(extras)
     if not subs:
         return
     tokens_now = {t for batch in subs for t in batch["tokens"]}

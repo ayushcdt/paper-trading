@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from logzero import logger
@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from paper.portfolio import PaperPortfolio, STARTING_CAPITAL
 from data_fetcher import get_fetcher
 from adaptive.targets import compute_status
+from common.market_hours import is_market_hours, now_ist
 
 
 STOCKS_JSON = Path(__file__).resolve().parent.parent.parent / "data" / "stocks.json"
@@ -59,10 +60,34 @@ def _live_prices(symbols: list[str]) -> dict[str, float]:
     return prices
 
 
+def _next_market_open_iso() -> str:
+    """ISO timestamp of the next 09:15 IST market open from now."""
+    ist = now_ist()
+    target = ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    if target <= ist:
+        target = target + timedelta(days=1)
+    while target.weekday() >= 5:
+        target = target + timedelta(days=1)
+    return target.isoformat()
+
+
 def run_paper_runner() -> dict:
-    """Main entry point. Returns the exported snapshot."""
+    """Main entry point. Returns the exported snapshot.
+
+    Market-hours behaviour (Option C — next-day-open execution):
+      - During market hours: opens fill at current LTP, closes happen at LTP.
+      - Outside market hours: new picks are queued as pending_open for next
+        09:15 IST fill. Closes are skipped with a warning (the next in-hours
+        run will pick them up). The 09:15+ MarkToMarket task fills pendings.
+    """
     logger.info("Paper runner: starting daily reconciliation")
     pf = PaperPortfolio()
+    market_open = is_market_hours()
+    if not market_open:
+        logger.info(
+            "Market closed -- opens will be queued as pending_open for next 09:15 IST; "
+            "closes deferred to next in-hours run."
+        )
 
     picks_file = _load_picks_json()
     new_picks = picks_file.get("picks", []) or []
@@ -82,44 +107,70 @@ def run_paper_runner() -> dict:
     # ----- Close: positions no longer in picks, kill switch, or BEAR regime
     force_all_close = kill_switch or regime == "BEAR" or deploy_pct == 0
     closed = []
+    deferred_closes = []
     for sym in list(open_syms):
         pos = open_positions[sym]
         current_price = prices.get(sym, pos.entry_price)
-        if force_all_close:
-            reason = "kill switch" if kill_switch else ("regime=BEAR" if regime == "BEAR" else "deploy=0")
-            result = pf.close_position(sym, current_price, reason)
-            if result:
-                closed.append(result)
-        elif sym not in new_syms:
-            result = pf.close_position(sym, current_price, "dropped from picks")
-            if result:
-                closed.append(result)
+        should_close = force_all_close or (sym not in new_syms)
+        if not should_close:
+            continue
+        reason = (
+            "kill switch" if kill_switch else
+            "regime=BEAR" if regime == "BEAR" else
+            "deploy=0"   if deploy_pct == 0 else
+            "dropped from picks"
+        )
+        if not market_open:
+            deferred_closes.append((sym, reason))
+            continue
+        result = pf.close_position(sym, current_price, reason)
+        if result:
+            closed.append(result)
+    if deferred_closes:
+        logger.info(f"Deferred {len(deferred_closes)} closes to next in-hours run: "
+                    f"{[s for s,_ in deferred_closes]}")
+
+    # ----- Cancel any pending_opens whose symbols are no longer in current picks.
+    for pending in pf.get_pending_opens():
+        if pending["symbol"] not in new_syms or force_all_close:
+            pf.cancel_pending_open(pending["symbol"])
+            logger.info(f"Cancelled pending_open {pending['symbol']} (no longer in picks)")
 
     # ----- Open: new picks not yet held (only if we're actually deploying)
     opened = []
+    queued = []
     if not force_all_close and new_picks:
         # Current equity determines slot notional
         current_equity = pf.current_equity(prices)
         n_slots = len(new_picks) if new_picks else 1
         # Size per the picks list (the engine already applied deploy_pct to pick count)
         slot_notional = current_equity / n_slots if n_slots > 0 else current_equity
+        next_open_iso = _next_market_open_iso()
+        already_pending = {p["symbol"] for p in pf.get_pending_opens()}
         for pick in new_picks:
             sym = pick["symbol"]
-            if sym in open_syms:
+            if sym in open_syms or sym in already_pending:
                 continue
             entry_price = float(pick.get("cmp", prices.get(sym, 0)))
             if entry_price <= 0:
                 continue
             stop = float(pick.get("stop_loss", entry_price * 0.85))
-            pos = pf.open_position(
-                symbol=sym,
-                variant=pick.get("variant") or variant_chosen,
-                regime=regime,
-                entry_price=entry_price,
-                slot_notional=slot_notional,
-                stop=stop,
-            )
-            opened.append({"symbol": sym, "entry": entry_price, "qty": pos.qty, "notional": slot_notional})
+            variant_for_pick = pick.get("variant") or variant_chosen
+            if market_open:
+                pos = pf.open_position(
+                    symbol=sym, variant=variant_for_pick, regime=regime,
+                    entry_price=entry_price, slot_notional=slot_notional,
+                    stop=stop,
+                )
+                opened.append({"symbol": sym, "entry": entry_price, "qty": pos.qty, "notional": slot_notional})
+            else:
+                pf.queue_pending_open(
+                    symbol=sym, variant=variant_for_pick, regime=regime,
+                    intended_entry_price=entry_price,
+                    planned_slot_notional=slot_notional,
+                    stop=stop, intended_fill_at=next_open_iso,
+                )
+                queued.append({"symbol": sym, "ref_price": entry_price, "fill_at": next_open_iso})
 
     # ----- Mark remaining positions to market
     marks = pf.mark_to_market(prices)
@@ -146,9 +197,10 @@ def run_paper_runner() -> dict:
         logger.warning(f"Target computation failed: {e}")
 
     logger.info(
-        f"Paper runner done: opened={len(opened)}, closed={len(closed)}, "
+        f"Paper runner done: opened={len(opened)}, queued={len(queued)}, "
+        f"closed={len(closed)}, deferred_closes={len(deferred_closes)}, "
         f"marks={marks}, open_now={snap['open_positions_count']}, "
-        f"equity=₹{snap['current_equity']:,.0f}, pnl={snap['total_pnl_pct']:+.2f}%"
+        f"equity=Rs.{snap['current_equity']:,.0f}, pnl={snap['total_pnl_pct']:+.2f}%"
     )
     return snap
 
