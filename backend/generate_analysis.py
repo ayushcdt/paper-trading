@@ -26,6 +26,7 @@ class NumpyEncoder(json.JSONEncoder):
 
 from config import VERCEL_CONFIG
 from stock_picker import run_stock_picker, run_stock_picker_v2, run_stock_picker_v3
+from strategy.momentum_picker import run_momentum_picker
 from market_analyzer import run_market_analysis
 from paper.runner import run_paper_runner
 from news.feed import fetch_news_snapshot
@@ -249,24 +250,33 @@ def run_full_analysis():
     market_analysis = run_market_analysis()
     save_local(market_analysis, "market.json")
 
-    # 2. Stock Picks -- V3 adaptive (regime classifier + variants + guardrails)
-    logger.info("\n[2/3] Running V3 adaptive stock picker...")
-    v3 = run_stock_picker_v3(max_picks=15)
+    # 2. Stock Picks -- Momentum + Risk Overlay (replaced V3 adaptive 2026-04-28
+    #    after backtest showed V3 had -3.78% alpha vs Nifty over 4.3y. New picker
+    #    uses momentum_agg variant + sector cap + DD circuit breaker + VIX gate.
+    #    Backtest evidence: Q4 sustainability research = +21.69% CAGR, Sharpe 1.35,
+    #    MaxDD -16% on 4.3y. See data/research/sustainability/q4_momentum_with_risk.json.)
+    logger.info("\n[2/3] Running momentum_agg picker with risk overlay...")
+    picker_out = run_momentum_picker(max_picks=10)
     stocks_data = {
         "generated_at": datetime.now().isoformat(),
-        "generated_by": "Artha 2.0 -- V3 Adaptive",
-        "strategy_version": "v3-adaptive",
-        "validation_status": "Backtested 2015-2025; use judgment before committing real capital",
+        "generated_by": "Artha 2.0 -- Momentum Base + Risk Overlay",
+        "strategy_version": "momentum-base-v1",
+        "validation_status": (
+            "Backtested 2022-2026 (4.3y) on Nifty 100: +21.69% CAGR, Sharpe 1.35, "
+            "MaxDD -16%. Replaces V3 (which had negative alpha). "
+            "Real-money deployment gated on walk-forward validation (Phase S3)."
+        ),
         "market_condition": market_analysis.get('stance', {}).get('stance', 'UNKNOWN'),
-        "regime": v3.get("regime"),
-        "regime_reason": v3.get("regime_reason"),
-        "regime_inputs": v3.get("regime_inputs"),
-        "variant": v3.get("variant"),
-        "variant_reason": v3.get("variant_reason"),
-        "deploy_pct": v3.get("deploy_pct"),
-        "kill_switch_active": v3.get("kill_switch_active"),
-        "kill_switch_reason": v3.get("kill_switch_reason"),
-        "picks": v3.get("picks", []),
+        "regime": picker_out.get("regime"),
+        "regime_reason": picker_out.get("regime_reason"),
+        "regime_inputs": picker_out.get("regime_inputs"),
+        "variant": picker_out.get("variant"),
+        "variant_reason": picker_out.get("variant_reason"),
+        "deploy_pct": picker_out.get("deploy_pct"),
+        "kill_switch_active": picker_out.get("kill_switch_active"),
+        "kill_switch_reason": picker_out.get("kill_switch_reason"),
+        "picks": picker_out.get("picks", []),
+        "risk_overlay": picker_out.get("risk_overlay", {}),
     }
     save_local(stocks_data, "stocks.json")
 

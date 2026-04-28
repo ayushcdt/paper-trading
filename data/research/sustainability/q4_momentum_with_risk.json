@@ -1,0 +1,48 @@
+{
+  "strategy": "momentum_agg_with_risk",
+  "start": "2022-01-01",
+  "end": "2026-04-25",
+  "metrics": {
+    "years": 4.3,
+    "initial_capital": 1000000,
+    "final_equity": 2327839.9,
+    "total_return_pct": 132.78,
+    "cagr_pct": 21.69,
+    "sharpe": 1.353,
+    "sortino": 1.119,
+    "max_drawdown_pct": -15.93,
+    "calmar": 1.362,
+    "n_trades": 75,
+    "win_rate_pct": 52.0,
+    "avg_winner_pct": 38.18,
+    "avg_loser_pct": -6.3,
+    "profit_factor": 4.52,
+    "nifty_total_return_pct": 35.59,
+    "nifty_cagr_pct": 7.33,
+    "alpha_vs_nifty_cagr_pct": 14.36
+  },
+  "per_regime": {
+    "UNKNOWN": {
+      "trades": 75,
+      "wins": 39,
+      "total_pnl": 1286689.0609327313,
+      "win_rate_pct": 52.0,
+      "total_pnl_inr": 1286689.06
+    }
+  },
+  "bootstrap_ci": {
+    "cagr_pct_95ci": [
+      5.12,
+      42.75
+    ],
+    "max_dd_pct_95ci": [
+      -34.66,
+      -8.23
+    ],
+    "sharpe_95ci": [
+      0.381,
+      2.51
+    ]
+  },
+  "n_trades": 75
+}

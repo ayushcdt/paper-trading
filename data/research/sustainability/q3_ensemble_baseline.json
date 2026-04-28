@@ -1,0 +1,48 @@
+{
+  "strategy": "ensemble_40_40_20",
+  "start": "2022-01-01",
+  "end": "2026-04-25",
+  "metrics": {
+    "years": 4.3,
+    "initial_capital": 1000000,
+    "final_equity": 1747177.84,
+    "total_return_pct": 74.72,
+    "cagr_pct": 13.84,
+    "sharpe": 1.015,
+    "sortino": 1.301,
+    "max_drawdown_pct": -16.79,
+    "calmar": 0.825,
+    "n_trades": 1461,
+    "win_rate_pct": 53.5,
+    "avg_winner_pct": 6.52,
+    "avg_loser_pct": -5.68,
+    "profit_factor": 1.26,
+    "nifty_total_return_pct": 35.59,
+    "nifty_cagr_pct": 7.33,
+    "alpha_vs_nifty_cagr_pct": 6.51
+  },
+  "per_regime": {
+    "UNKNOWN": {
+      "trades": 1461,
+      "wins": 782,
+      "total_pnl": 474761.42628000013,
+      "win_rate_pct": 53.5,
+      "total_pnl_inr": 474761.43
+    }
+  },
+  "bootstrap_ci": {
+    "cagr_pct_95ci": [
+      0.2,
+      30.15
+    ],
+    "max_dd_pct_95ci": [
+      -32.36,
+      -9.81
+    ],
+    "sharpe_95ci": [
+      0.082,
+      2.019
+    ]
+  },
+  "n_trades": 1461
+}

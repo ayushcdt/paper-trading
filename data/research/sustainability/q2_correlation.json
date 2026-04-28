@@ -1,0 +1,20 @@
+{
+  "correlation_matrix": {
+    "momentum_agg": {
+      "momentum_agg": 1.0,
+      "oversold_quality": 0.5027937641485059,
+      "equal_weight_n50": 0.48555792202068704
+    },
+    "oversold_quality": {
+      "momentum_agg": 0.5027937641485059,
+      "oversold_quality": 1.0,
+      "equal_weight_n50": 0.7289576074526717
+    },
+    "equal_weight_n50": {
+      "momentum_agg": 0.48555792202068704,
+      "oversold_quality": 0.7289576074526717,
+      "equal_weight_n50": 1.0
+    }
+  },
+  "interpretation": "Low correlation (<0.7) = strategies provide diversification benefit. High correlation (>0.85) = ensemble is just one strategy in disguise."
+}

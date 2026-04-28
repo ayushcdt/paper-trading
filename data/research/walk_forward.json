@@ -1,0 +1,105 @@
+{
+  "run_at": "2026-04-28T18:58:19.387530",
+  "folds": [
+    {
+      "fold": "fold_1_2024_h1",
+      "start": "2024-01-01",
+      "end": "2024-06-30",
+      "cagr_pct": 58.32,
+      "sharpe": 1.664,
+      "sortino": 1.539,
+      "max_dd_pct": -12.95,
+      "calmar": 4.504,
+      "n_trades": 22,
+      "win_rate_pct": 40.9,
+      "alpha_pct": 35.87,
+      "nifty_cagr_pct": 22.45
+    },
+    {
+      "fold": "fold_2_2024_h2",
+      "start": "2024-07-01",
+      "end": "2024-12-31",
+      "cagr_pct": -10.31,
+      "sharpe": -0.719,
+      "sortino": -0.925,
+      "max_dd_pct": -12.89,
+      "calmar": -0.8,
+      "n_trades": 26,
+      "win_rate_pct": 34.6,
+      "alpha_pct": -6.24,
+      "nifty_cagr_pct": -4.07
+    },
+    {
+      "fold": "fold_3_2025_h1",
+      "start": "2025-01-01",
+      "end": "2025-06-30",
+      "cagr_pct": 6.08,
+      "sharpe": 0.63,
+      "sortino": 0.838,
+      "max_dd_pct": -5.75,
+      "calmar": 1.057,
+      "n_trades": 42,
+      "win_rate_pct": 42.9,
+      "alpha_pct": -9.67,
+      "nifty_cagr_pct": 15.75
+    },
+    {
+      "fold": "fold_4_2025_h2",
+      "start": "2025-07-01",
+      "end": "2025-12-31",
+      "cagr_pct": 4.46,
+      "sharpe": 0.705,
+      "sortino": 1.316,
+      "max_dd_pct": -3.29,
+      "calmar": 1.357,
+      "n_trades": 38,
+      "win_rate_pct": 50.0,
+      "alpha_pct": -0.19,
+      "nifty_cagr_pct": 4.65
+    },
+    {
+      "fold": "fold_5_2026_h1",
+      "start": "2026-01-01",
+      "end": "2026-04-25",
+      "cagr_pct": -5.88,
+      "sharpe": -0.571,
+      "sortino": -0.708,
+      "max_dd_pct": -6.18,
+      "calmar": -0.95,
+      "n_trades": 32,
+      "win_rate_pct": 40.6,
+      "alpha_pct": 19.35,
+      "nifty_cagr_pct": -25.22
+    }
+  ],
+  "aggregate": {
+    "avg_cagr_pct": 10.53,
+    "avg_sharpe": 0.342,
+    "avg_alpha_pct": 7.82,
+    "worst_max_dd_pct": -12.95,
+    "worst_sharpe": -0.719,
+    "positive_cagr_folds": 3,
+    "positive_alpha_folds": 2,
+    "total_folds": 5
+  },
+  "gate_results": {
+    "all_max_dd_above": {
+      "passed": "True",
+      "detail": "worst MaxDD -12.95% > -25.0%"
+    },
+    "min_positive_cagr_count": {
+      "passed": true,
+      "detail": "3/5 positive-CAGR folds (need 3)"
+    },
+    "min_positive_alpha_count": {
+      "passed": false,
+      "detail": "2/5 positive-alpha folds (need 3)"
+    },
+    "min_worst_sharpe": {
+      "passed": "False",
+      "detail": "worst Sharpe -0.72 > -0.5"
+    }
+  },
+  "verdict": "FAIL \u2014 stay on paper, debug failing gates",
+  "duration_sec": 99.9
+}
