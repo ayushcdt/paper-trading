@@ -166,7 +166,7 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
     if swap_budget - len(out["closed"]) > 0:
         try:
             from strategy.intraday_signals import rank_intraday
-            from data_fetcher import SYMBOL_TOKENS, get_fetcher
+            from data_fetcher import SYMBOL_TOKENS
             # Fetch LTPs for held + a sample of universe (top-100 by recent activity)
             f = get_fetcher()
             if not f.logged_in:
