@@ -97,6 +97,9 @@ def _fill_pending(pf: PaperPortfolio) -> tuple[int, int, int]:
                 f"gap {gap_pct:+.1f}%, qty {pos.qty})"
             )
             filled += 1
+        else:
+            logger.info(f"Pending {sym} REJECTED at Rs{fill_price:.2f}: slot too small for 1 share -- pending removed")
+            gap_skipped += 1
     return (filled, gap_skipped, expired)
 
 

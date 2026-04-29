@@ -187,8 +187,15 @@ class PaperPortfolio:
         stop: float,
         entry_time: Optional[str] = None,
         reason: str = "new pick",
-    ) -> Position:
-        qty = max(1, int(slot_notional / entry_price)) if entry_price > 0 else 1
+    ) -> Optional[Position]:
+        """Open a new paper position. Returns None if the slot can't afford
+        even 1 share at the given entry_price (was previously max(1,...) which
+        created fictional leveraged positions — see commit fixing 'A')."""
+        if entry_price <= 0:
+            return None
+        qty = int(slot_notional / entry_price)
+        if qty <= 0:
+            return None   # slot too small for one share at this price -> skip honestly
         when_iso = entry_time or datetime.now().isoformat()
         when_date = when_iso[:10]
         pos = Position(
@@ -273,6 +280,8 @@ class PaperPortfolio:
             stop=float(stop), entry_time=fill_time_iso,
             reason="filled at next-day open",
         )
+        # Always remove the pending row regardless of whether qty was affordable;
+        # if pos is None, the pending was effectively rejected (slot too small for 1 share).
         with self._conn() as c:
             c.execute("DELETE FROM pending_opens WHERE symbol = ?", (symbol,))
         return pos

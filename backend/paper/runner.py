@@ -162,7 +162,10 @@ def run_paper_runner() -> dict:
                     entry_price=entry_price, slot_notional=slot_notional,
                     stop=stop,
                 )
-                opened.append({"symbol": sym, "entry": entry_price, "qty": pos.qty, "notional": slot_notional})
+                if pos is None:
+                    logger.info(f"Skipped {sym}: slot Rs{slot_notional:.0f} can't afford 1 share at Rs{entry_price:.2f}")
+                    continue
+                opened.append({"symbol": sym, "entry": entry_price, "qty": pos.qty, "notional": pos.qty * pos.entry_price})
             else:
                 pf.queue_pending_open(
                     symbol=sym, variant=variant_for_pick, regime=regime,
