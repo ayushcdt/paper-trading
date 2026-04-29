@@ -37,6 +37,8 @@ class Position:
     slot_notional: float
     stop_at_entry: float
     entry_date: str
+    target_price: float = 0.0   # added 2026-04-29 for stop/target check in mark_to_market
+    current_stop: float = 0.0   # trailing stop; raised by position_mgmt as profit grows
 
 
 class PaperPortfolio:
@@ -61,6 +63,17 @@ class PaperPortfolio:
                     stop_at_entry REAL,
                     entry_date TEXT NOT NULL
                 );
+            """)
+            # Additive migrations — idempotent
+            for ddl in [
+                "ALTER TABLE positions ADD COLUMN target_price REAL DEFAULT 0",
+                "ALTER TABLE positions ADD COLUMN current_stop REAL DEFAULT 0",
+            ]:
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
+            c.executescript("""
 
                 CREATE TABLE IF NOT EXISTS trade_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,9 +129,15 @@ class PaperPortfolio:
 
     def get_open_positions(self) -> dict[str, Position]:
         with self._conn() as c:
-            rows = c.execute("SELECT * FROM positions").fetchall()
+            rows = c.execute(
+                "SELECT symbol, variant, regime_at_entry, entry_price, qty, "
+                "slot_notional, stop_at_entry, entry_date, "
+                "COALESCE(target_price, 0), COALESCE(current_stop, 0) "
+                "FROM positions"
+            ).fetchall()
         cols = ["symbol", "variant", "regime_at_entry", "entry_price", "qty",
-                "slot_notional", "stop_at_entry", "entry_date"]
+                "slot_notional", "stop_at_entry", "entry_date",
+                "target_price", "current_stop"]
         return {r[0]: Position(**dict(zip(cols, r))) for r in rows}
 
     def get_open_symbols(self) -> list[str]:
@@ -195,19 +214,28 @@ class PaperPortfolio:
             return None
         qty = int(slot_notional / entry_price)
         if qty <= 0:
-            return None   # slot too small for one share at this price -> skip honestly
+            return None
         when_iso = entry_time or datetime.now().isoformat()
         when_date = when_iso[:10]
+        # Default target = entry × 1.10 (10% target). Picker can override later
+        # if it provides a different target_price in the pick dict.
+        target_price = entry_price * 1.10
+        current_stop = stop  # initial = stop_at_entry; trailing logic raises later
         pos = Position(
             symbol=symbol, variant=variant, regime_at_entry=regime,
             entry_price=entry_price, qty=qty, slot_notional=slot_notional,
             stop_at_entry=stop, entry_date=when_iso,
+            target_price=target_price, current_stop=current_stop,
         )
         with self._conn() as c:
             c.execute(
-                "INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO positions "
+                "(symbol, variant, regime_at_entry, entry_price, qty, slot_notional, "
+                " stop_at_entry, entry_date, target_price, current_stop) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (pos.symbol, pos.variant, pos.regime_at_entry, pos.entry_price,
-                 pos.qty, pos.slot_notional, pos.stop_at_entry, pos.entry_date),
+                 pos.qty, pos.slot_notional, pos.stop_at_entry, pos.entry_date,
+                 pos.target_price, pos.current_stop),
             )
             c.execute(
                 "INSERT INTO trade_log (symbol, variant, regime, action, price, qty, pnl_inr, pnl_pct, reason, timestamp, date) "
@@ -215,6 +243,22 @@ class PaperPortfolio:
                 (symbol, variant, regime, entry_price, qty, reason, when_iso, when_date),
             )
         return pos
+
+    def update_position_stop_target(self, symbol: str, new_stop: Optional[float] = None,
+                                     new_target: Optional[float] = None) -> None:
+        """Update trailing stop or target. Caller (mark_to_market) drives this."""
+        sets, vals = [], []
+        if new_stop is not None:
+            sets.append("current_stop = ?")
+            vals.append(float(new_stop))
+        if new_target is not None:
+            sets.append("target_price = ?")
+            vals.append(float(new_target))
+        if not sets:
+            return
+        vals.append(symbol)
+        with self._conn() as c:
+            c.execute(f"UPDATE positions SET {', '.join(sets)} WHERE symbol = ?", vals)
 
     # ---------- Pending opens (Option C: next-day-open execution) -----------
 

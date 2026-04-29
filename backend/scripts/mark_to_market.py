@@ -187,6 +187,33 @@ def _intraday_opportunity_pass(pf: PaperPortfolio):
         logger.warning(f"catalyst injection failed: {e}\n{traceback.format_exc()[:300]}")
 
 
+def _position_mgmt_pass(pf: PaperPortfolio):
+    """Phase 1.5: stops, targets, trailing, time-exit on every held position."""
+    open_syms = pf.get_open_symbols()
+    if not open_syms:
+        return
+    fetcher = get_fetcher()
+    if not fetcher.logged_in:
+        if not fetcher.login():
+            return
+    prices = {}
+    for sym in open_syms:
+        try:
+            ltp = float(fetcher.get_ltp(sym).get("ltp", 0))
+            if ltp > 0:
+                prices[sym] = ltp
+        except Exception:
+            pass
+    try:
+        from paper.position_mgmt import manage_positions
+        result = manage_positions(pf, prices)
+        if result["closed"] or result["trailed"]:
+            logger.info(f"Position mgmt: closed={len(result['closed'])} trailed={len(result['trailed'])}")
+    except Exception as e:
+        import traceback
+        logger.warning(f"position management failed: {e}\n{traceback.format_exc()[:300]}")
+
+
 def mark_only():
     if not is_market_hours():
         logger.info("Outside NSE market hours; skipping mark-to-market")
@@ -194,10 +221,13 @@ def mark_only():
 
     pf = PaperPortfolio()
 
-    # Phase 1: try to fill any pending_opens (Option C: next-day-open execution)
+    # Phase 1: fill any pending_opens (Option C: next-day-open execution)
     filled, gap_skipped, expired = _fill_pending(pf)
     if filled or gap_skipped or expired:
         logger.info(f"Pending fills: filled={filled}, gap_skipped={gap_skipped}, expired={expired}")
+
+    # Phase 1.5: position management (stops, targets, trailing, time-exit)
+    _position_mgmt_pass(pf)
 
     # Phase 2: intraday opportunity scan (LIVE: rebalance + catalyst injection)
     _intraday_opportunity_pass(pf)
