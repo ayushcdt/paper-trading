@@ -60,6 +60,145 @@ def _live_prices(symbols: list[str]) -> dict[str, float]:
     return prices
 
 
+# ---------- Intraday rebalance config ----------
+INTRADAY_MIN_HOLD_DAYS = 1          # don't swap a position opened today
+INTRADAY_MAX_SWAPS_PER_DAY = 2      # cap churn
+INTRADAY_SKIP_LAST_MINUTES = 30     # don't swap in last 30min of session
+
+
+def _today_swap_count(pf: PaperPortfolio) -> int:
+    """Count CLOSE actions today whose reason indicates a swap/rebalance (not stop/target)."""
+    today = now_ist().strftime("%Y-%m-%d")
+    import sqlite3
+    with sqlite3.connect(pf.db_path) as c:
+        rows = c.execute(
+            "SELECT reason FROM trade_log WHERE action='CLOSE' AND date=? "
+            "AND (reason LIKE '%swap%' OR reason LIKE '%rebalance%')",
+            (today,),
+        ).fetchall()
+    return len(rows)
+
+
+def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict[str, float]) -> dict:
+    """Intraday opportunity-cost rebalance. Called every 15min during market hours.
+
+    Logic:
+      1. Compare current picks vs held positions.
+      2. Identify held positions not in latest picks (drop candidates).
+      3. Filter drops by min-holding-period (1 day) and max-swaps-per-day (2).
+      4. Close eligible drops at LTP.
+      5. Use freed cash + existing free cash to open candidates not yet held,
+         with greedy fill semantics (same as paper.runner main loop).
+      6. Skip everything if within last 30 min of session (avoid end-of-day fills).
+
+    Returns: {closed: [...], opened: [...], skipped_reasons: [...]}
+    """
+    out = {"closed": [], "opened": [], "skipped_reasons": []}
+    ist = now_ist()
+    if not is_market_hours():
+        out["skipped_reasons"].append("market closed")
+        return out
+    # Skip last 30 minutes
+    minutes_to_close = (15 * 60 + 30) - (ist.hour * 60 + ist.minute)
+    if minutes_to_close <= INTRADAY_SKIP_LAST_MINUTES:
+        out["skipped_reasons"].append(f"within last {INTRADAY_SKIP_LAST_MINUTES}min of session")
+        return out
+
+    # Risk overlay halts apply
+    if picker_out.get("kill_switch_active"):
+        out["skipped_reasons"].append(f"kill switch active: {picker_out.get('kill_switch_reason')}")
+        return out
+
+    new_picks = picker_out.get("picks", []) or []
+    new_pick_syms = {p["symbol"] for p in new_picks}
+    open_positions = pf.get_open_positions()
+    held_syms = set(open_positions.keys())
+
+    # Drop candidates: held positions not in latest picks
+    drop_candidates = held_syms - new_pick_syms
+
+    # Filter by min holding period
+    today = ist.date()
+    eligible_drops = []
+    for sym in drop_candidates:
+        pos = open_positions[sym]
+        try:
+            entry_date = datetime.fromisoformat(pos.entry_date).date()
+        except Exception:
+            continue
+        days_held = (today - entry_date).days
+        if days_held < INTRADAY_MIN_HOLD_DAYS:
+            out["skipped_reasons"].append(f"{sym}: held only {days_held}d, min {INTRADAY_MIN_HOLD_DAYS}d")
+            continue
+        eligible_drops.append(sym)
+
+    # Apply max-swaps-per-day cap
+    today_swaps = _today_swap_count(pf)
+    swap_budget = max(0, INTRADAY_MAX_SWAPS_PER_DAY - today_swaps)
+    if today_swaps >= INTRADAY_MAX_SWAPS_PER_DAY:
+        out["skipped_reasons"].append(f"hit daily swap cap ({INTRADAY_MAX_SWAPS_PER_DAY})")
+        return out
+    eligible_drops = eligible_drops[:swap_budget]
+
+    # Execute drops first to free cash
+    for sym in eligible_drops:
+        price = latest_prices.get(sym) or open_positions[sym].entry_price
+        result = pf.close_position(sym, price, "intraday swap (dropped from picks)")
+        if result:
+            out["closed"].append({"symbol": sym, "price": price, "pnl_inr": result.get("pnl_inr", 0)})
+            logger.info(f"INTRADAY SWAP_OUT {sym} @ Rs{price:.2f}  pnl Rs{result.get('pnl_inr', 0):+.0f}")
+
+    if not out["closed"]:
+        # No drops -> nothing to do; openings only happen if we freed up cash
+        return out
+
+    # Re-read state after closes
+    open_positions = pf.get_open_positions()
+    held_syms = set(open_positions.keys())
+    held_notional = sum(p.qty * p.entry_price for p in open_positions.values())
+    current_equity = pf.current_equity(latest_prices)
+    cash_available = max(0.0, current_equity - held_notional)
+
+    # Open candidates: picks not yet held (greedy fill same as main loop)
+    add_candidates = []
+    for pick in new_picks:
+        sym = pick["symbol"]
+        if sym in held_syms:
+            continue
+        entry_price = float(pick.get("cmp", latest_prices.get(sym, 0)))
+        if entry_price <= 0:
+            continue
+        add_candidates.append((pick, entry_price))
+
+    target_slot = current_equity / max(1, len(new_picks))
+    remaining_cash = cash_available
+    variant_chosen = picker_out.get("variant", "")
+    regime = picker_out.get("regime", "")
+    for pick, entry_price in add_candidates:
+        sym = pick["symbol"]
+        if entry_price > remaining_cash:
+            continue
+        n_target = max(1, int(target_slot / entry_price))
+        n_max = int(remaining_cash / entry_price)
+        qty = min(n_target, n_max)
+        if qty <= 0:
+            continue
+        cost = qty * entry_price
+        stop = float(pick.get("stop_loss", entry_price * 0.85))
+        pos = pf.open_position(
+            symbol=sym, variant=pick.get("variant") or variant_chosen,
+            regime=regime, entry_price=entry_price, slot_notional=cost,
+            stop=stop, reason="intraday swap (new pick)",
+        )
+        if pos is None:
+            continue
+        out["opened"].append({"symbol": sym, "price": entry_price, "qty": qty, "notional": cost})
+        logger.info(f"INTRADAY SWAP_IN {sym} qty={qty} @ Rs{entry_price:.2f}  (cost Rs{cost:.0f})")
+        remaining_cash -= cost
+
+    return out
+
+
 def _next_market_open_iso() -> str:
     """ISO timestamp of the next 09:15 IST market open from now."""
     ist = now_ist()

@@ -167,8 +167,15 @@ def _update_dd_halt(state: dict, current_equity: float) -> tuple[dict, str]:
 
 # ---------- Pick generation -------------------------------------------------
 
-def _build_universe_histories(min_bars: int = 252) -> dict[str, pd.DataFrame]:
-    """Load bars for universe stocks with enough history for momentum_agg."""
+def _build_universe_histories(min_bars: int = 252, intraday_ltps: Optional[dict[str, float]] = None) -> dict[str, pd.DataFrame]:
+    """Load bars for universe stocks with enough history for momentum_agg.
+
+    If `intraday_ltps` provided: append today's running close (LTP) onto each
+    history so the picker uses live intraday price for the most-recent close
+    in 6m/3m momentum components. The 12-1m component (60% weight) is unaffected
+    because it uses the close from 21+ days ago — but 6m/3m shifts ARE captured.
+    """
+    today_ist = pd.Timestamp(now_ist().date())
     out = {}
     for sym, tok in SYMBOL_TOKENS.items():
         if tok.startswith("999"):  # indices
@@ -179,6 +186,22 @@ def _build_universe_histories(min_bars: int = 252) -> dict[str, pd.DataFrame]:
         df = df.copy()
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date").reset_index(drop=True)
+        # If intraday LTPs supplied AND today's bar isn't already in DB, append
+        # a synthetic running candle. (If today's bar IS in DB, leave it alone —
+        # that means market is closed and the daily bar has been finalised.)
+        if intraday_ltps and sym in intraday_ltps:
+            ltp = float(intraday_ltps[sym])
+            if ltp > 0 and df["Date"].iloc[-1] < today_ist:
+                # Append a synthetic row: open/high/low approximated, close=LTP.
+                # Only Close is used by momentum_12_1; OHLV are filler.
+                last = df.iloc[-1]
+                synthetic = {
+                    "Date": today_ist,
+                    "Open": ltp, "High": max(ltp, last["High"]),
+                    "Low": min(ltp, last["Low"]),
+                    "Close": ltp, "Volume": 0,
+                }
+                df = pd.concat([df, pd.DataFrame([synthetic])], ignore_index=True)
         out[sym] = df
     return out
 
@@ -220,9 +243,14 @@ def _current_held_sector_exposure() -> tuple[dict[str, float], float]:
 
 # ---------- Public API ------------------------------------------------------
 
-def run_momentum_picker(max_picks: int = MAX_POSITIONS) -> dict:
+def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[dict[str, float]] = None) -> dict:
     """Production picker — replaces run_stock_picker_v3.
-    Returns same dict shape as the V3 picker for compatibility."""
+    Returns same dict shape as the V3 picker for compatibility.
+
+    If `intraday_ltps` provided, the picker uses live intraday prices for
+    today's close (via _build_universe_histories). Used by the intraday
+    rebalance loop in mark_to_market.py.
+    """
     state = _load_state()
 
     # Risk gates BEFORE generating picks
@@ -243,7 +271,7 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS) -> dict:
         halt_reasons.append(nifty_reason)
 
     # Generate momentum_agg picks
-    histories = _build_universe_histories(min_bars=252)
+    histories = _build_universe_histories(min_bars=252, intraday_ltps=intraday_ltps)
     if not histories:
         logger.warning("momentum_picker: no histories loaded")
         _save_state(state)
