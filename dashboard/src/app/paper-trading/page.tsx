@@ -1,6 +1,7 @@
 import { getBlob } from '@/lib/blob'
 import { Briefcase, TrendingUp, TrendingDown, Activity, AlertTriangle, Target, Zap } from 'lucide-react'
 import { LivePaperSnapshot } from '@/components/LivePaperSnapshot'
+import { RealFeesCard } from '@/components/RealFeesCard'
 import type { PaperSnapshot } from '@/lib/paper'
 
 // SSR fallback only — LivePaperSnapshot client overrides with 10s polling
@@ -177,6 +178,9 @@ export default async function PaperTradingPage() {
           </div>
         )}
       </div>
+
+      {/* Real-money fees breakdown — what these trades would have cost as real money */}
+      <RealFeesCard />
     </div>
   )
 }

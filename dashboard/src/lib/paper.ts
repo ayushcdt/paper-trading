@@ -48,6 +48,40 @@ export interface PaperTargetStatus {
   months_under_target: number
 }
 
+export interface PaperFeeBreakdown {
+  brokerage: number
+  stt: number
+  exchange: number
+  sebi: number
+  stamp: number
+  gst: number
+  total: number
+  is_intraday: boolean
+}
+
+export interface PaperFeeRecentTrade {
+  symbol: string
+  date: string
+  is_intraday: boolean
+  real_fee_inr: number
+  breakdown: PaperFeeBreakdown
+  exit_notional: number
+  pnl_inr: number
+}
+
+export interface PaperFeesSummary {
+  total_real_fees_inr: number
+  intraday_fees_inr: number
+  delivery_fees_inr: number
+  n_closes: number
+  n_intraday_closes: number
+  n_delivery_closes: number
+  flat_estimate_inr: number
+  real_vs_flat_inr: number
+  avg_fee_per_close_inr: number
+  recent_trades: PaperFeeRecentTrade[]
+}
+
 export interface PaperSnapshot {
   generated_at: string
   started_at: string
@@ -62,4 +96,5 @@ export interface PaperSnapshot {
   live_3m_return_by_variant: Record<string, number>
   equity_curve: PaperEquityPoint[]
   target_status?: PaperTargetStatus
+  fees_summary?: PaperFeesSummary
 }
