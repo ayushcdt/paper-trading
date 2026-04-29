@@ -120,11 +120,16 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
 
     new_picks = picker_out.get("picks", []) or []
     new_pick_syms = {p["symbol"] for p in new_picks}
+    # HOLD universe is the wider pool (top 20) — drop only if symbol falls out
+    # of THIS list, not the strict top 10. Prevents rank-flicker churn at the
+    # rank-10 boundary where intraday LTP noise was flipping picks every 15 min.
+    extended = picker_out.get("picks_extended") or []
+    hold_pick_syms = {p["symbol"] for p in extended} if extended else new_pick_syms
     open_positions = pf.get_open_positions()
     held_syms = set(open_positions.keys())
 
-    # Drop candidates: held positions not in latest picks
-    drop_candidates = held_syms - new_pick_syms
+    # Drop candidates: held positions not in the wider hold universe
+    drop_candidates = held_syms - hold_pick_syms
 
     # Filter by min holding period
     today = ist.date()

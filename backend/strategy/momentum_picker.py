@@ -285,6 +285,15 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[
         return _empty_result(state, "variant unavailable", halt_reasons, vix_mult, vix_reason)
 
     today = pd.Timestamp(now_ist().date())
+    # Generate a wider pool than max_picks so we can return both:
+    #   picks         -> top max_picks (10) for OPENs (strict)
+    #   picks_extended-> top HOLD_BUFFER (20) for HOLD checks (asymmetric guard)
+    # Asymmetric: opens require rank<=10 (high conviction) but holds tolerate
+    # rank<=20 (small intraday rank flickers don't trigger churn). Fixes the
+    # whipsaw where a held name flipping #10 <-> #11 every 15 min was being
+    # closed and reopened, bleeding friction.
+    HOLD_BUFFER = 20
+    momentum.max_picks = max(HOLD_BUFFER, max_picks * 2, 25)
     try:
         raw_picks = momentum.pick(histories, today, list(histories.keys()))
     except Exception as e:
@@ -295,8 +304,12 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[
     # Apply sector cap (using current portfolio sector exposure as starting state)
     capped = _apply_sector_cap(raw_picks, held_by_sector, current_equity or 1_000_000)
 
-    # Trim to max_picks
+    # Trim to max_picks (for OPEN candidates — these are the ones we'd buy fresh)
     final_picks_objs = capped[:max_picks]
+    # Wider pool for HOLD-buffer check — uses raw_picks (NO sector cap)
+    # because sector cap is a "new open" filter; we already hold the position
+    # and just want to know if it's still a momentum leader by raw rank.
+    hold_universe_objs = raw_picks[:HOLD_BUFFER]
 
     # Convert to dict shape generate_analysis expects.
     # Targets are ATR-based (3x ATR for momentum) instead of a flat 10% — gives
@@ -356,6 +369,10 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[
         "kill_switch_active": halt_blocking_new,
         "kill_switch_reason": " | ".join(halt_reasons) if halt_reasons else "",
         "picks": picks_dicts,
+        "picks_extended": [
+            {"rank": i + 1, "symbol": p.symbol, "score": round(p.score, 2)}
+            for i, p in enumerate(hold_universe_objs)
+        ],
         "risk_overlay": {
             "max_positions": MAX_POSITIONS,
             "sector_cap_pct": SECTOR_CAP_PCT,

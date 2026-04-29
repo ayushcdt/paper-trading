@@ -31,14 +31,24 @@ from paper.portfolio import PaperPortfolio
 MAX_HOLD_DAYS_DEFAULT = 30
 MAX_HOLD_DAYS_CATALYST = 5
 
-TRAIL_LEVEL_1_PCT = 5.0     # at +5% gain
-TRAIL_LEVEL_1_NEW_STOP = "breakeven"   # raise stop to entry
+# ATR-aware trailing stops -- much tighter than the old fixed % thresholds
+# (5/10/15) which never fired on intraday moves. ATR proxy is derived from
+# the position's target_price (target = entry + 3*ATR by P6 design), so:
+#   atr_proxy = (target_price - entry_price) / 3.0
+# Trailing levels (gain expressed as multiples of ATR proxy):
+#   >= 1x ATR (~+2%)   -> raise stop to BREAKEVEN (entry)
+#   >= 2x ATR (~+4%)   -> raise stop to entry + 0.5x ATR (lock half the gain)
+#   >= 3x ATR  -> handled by per-tick TARGET HIT in paper_marker (full close)
+# Falls back to fixed pct thresholds if target_price isn't set on the position.
+TRAIL_ATR_LEVEL_1 = 1.0   # at 1x ATR -> breakeven
+TRAIL_ATR_LEVEL_2 = 2.0   # at 2x ATR -> lock 0.5x ATR
+TRAIL_ATR_LOCK_FRAC = 0.5
 
-TRAIL_LEVEL_2_PCT = 10.0    # at +10% gain
-TRAIL_LEVEL_2_NEW_STOP_FRAC = 0.5  # raise stop to entry + 50% of gain
-
-TRAIL_LEVEL_3_PCT = 15.0    # at +15% gain
-TRAIL_LEVEL_3_TRAIL_PCT = 3.0  # trail by 3% from current price
+# Fallback fixed-pct levels if no target_price -- much tighter than old
+# 5/10/15 to actually fire intraday on real moves.
+TRAIL_FALLBACK_L1_PCT = 1.5
+TRAIL_FALLBACK_L2_PCT = 3.0
+TRAIL_FALLBACK_L2_LOCK_FRAC = 0.5
 
 
 def _alert(severity: str, title: str, body: str) -> None:
@@ -91,25 +101,34 @@ def _check_position(pf: PaperPortfolio, sym: str, pos, ltp: float) -> dict | Non
                    f"Closed at Rs{ltp:.2f} after {days_held} days\nP&L: Rs{result.get('pnl_inr', 0):+.0f} ({pnl_pct:+.2f}%)")
             return {"action": "CLOSE", "reason": "time", "pnl_inr": result.get("pnl_inr", 0)}
 
-    # 4. TRAILING STOP — raise stop as price climbs
+    # 4. TRAILING STOP — ATR-aware, tight (fires intraday on real moves).
     new_stop = effective_stop
     raised = False
-    if pnl_pct >= TRAIL_LEVEL_3_PCT:
-        candidate = ltp * (1 - TRAIL_LEVEL_3_TRAIL_PCT / 100)
-        if candidate > new_stop:
-            new_stop = candidate
-            raised = True
-    elif pnl_pct >= TRAIL_LEVEL_2_PCT:
-        gain = ltp - pos.entry_price
-        candidate = pos.entry_price + (gain * TRAIL_LEVEL_2_NEW_STOP_FRAC)
-        if candidate > new_stop:
-            new_stop = candidate
-            raised = True
-    elif pnl_pct >= TRAIL_LEVEL_1_PCT:
-        candidate = pos.entry_price  # breakeven
-        if candidate > new_stop:
-            new_stop = candidate
-            raised = True
+    gain = ltp - pos.entry_price
+    if pos.target_price > pos.entry_price:
+        atr_proxy = (pos.target_price - pos.entry_price) / 3.0
+        if gain >= TRAIL_ATR_LEVEL_2 * atr_proxy:
+            candidate = pos.entry_price + atr_proxy * TRAIL_ATR_LOCK_FRAC
+            if candidate > new_stop:
+                new_stop = candidate
+                raised = True
+        elif gain >= TRAIL_ATR_LEVEL_1 * atr_proxy:
+            candidate = pos.entry_price  # breakeven
+            if candidate > new_stop:
+                new_stop = candidate
+                raised = True
+    else:
+        # Fallback: fixed pct thresholds
+        if pnl_pct >= TRAIL_FALLBACK_L2_PCT:
+            candidate = pos.entry_price + (gain * TRAIL_FALLBACK_L2_LOCK_FRAC)
+            if candidate > new_stop:
+                new_stop = candidate
+                raised = True
+        elif pnl_pct >= TRAIL_FALLBACK_L1_PCT:
+            candidate = pos.entry_price
+            if candidate > new_stop:
+                new_stop = candidate
+                raised = True
 
     if raised:
         pf.update_position_stop_target(sym, new_stop=new_stop)
