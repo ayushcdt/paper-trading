@@ -120,16 +120,22 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
 
     new_picks = picker_out.get("picks", []) or []
     new_pick_syms = {p["symbol"] for p in new_picks}
-    # HOLD universe is the wider pool (top 20) — drop only if symbol falls out
-    # of THIS list, not the strict top 10. Prevents rank-flicker churn at the
-    # rank-10 boundary where intraday LTP noise was flipping picks every 15 min.
     extended = picker_out.get("picks_extended") or []
     hold_pick_syms = {p["symbol"] for p in extended} if extended else new_pick_syms
     open_positions = pf.get_open_positions()
     held_syms = set(open_positions.keys())
 
-    # Drop candidates: held positions not in the wider hold universe
-    drop_candidates = held_syms - hold_pick_syms
+    # Drop candidates: held positions not in the wider hold universe.
+    # EXCLUDE intraday_strength + catalyst variants -- those positions have
+    # their own exit rules (tight stops/targets, news-tail) and should NOT
+    # be churned out just because they fell out of the daily-bar picker. This
+    # was the bug that closed manually-opened EOD-chase positions every 15
+    # min and the catalyst injections within minutes of opening.
+    SELF_MANAGED_VARIANTS = {"intraday_strength", "catalyst"}
+    drop_candidates = {
+        sym for sym in (held_syms - hold_pick_syms)
+        if open_positions[sym].variant not in SELF_MANAGED_VARIANTS
+    }
 
     # Filter by min holding period
     today = ist.date()
@@ -176,7 +182,11 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
             f = get_fetcher()
             if not f.logged_in:
                 f.login()
-            sample_universe = list(set(SYMBOL_TOKENS.keys()) - held_syms)[:100]
+            # Was [:100] -- missed BANDHANBNK at index 114 today during a
+            # +13% intraday move. Bumped to 250 to cover the whole liquid
+            # universe (currently 512 tokens). Each LTP fetch is ~50ms so
+            # 250 fetches take ~12s -- acceptable for sub-minute scan loop.
+            sample_universe = list(set(SYMBOL_TOKENS.keys()) - held_syms)[:250]
             sample_ltps = dict(latest_prices)
             for sym in sample_universe:
                 if sym in sample_ltps:

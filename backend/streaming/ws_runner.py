@@ -248,12 +248,58 @@ def subscription_refresher():
                 logger.debug(f"paper_marker refresh_held failed: {e}")
 
 
+REALTIME_REBALANCE_INTERVAL_SEC = 30
+
+
+def realtime_rebalance_loop():
+    """Replaces the 15-min mark_to_market scheduled task for intraday rebalance.
+    Runs every 30s during market hours: pending fills + position mgmt
+    (15-min logic complemented by per-tick trailing in paper_marker) +
+    intraday strength scan + catalyst injection. Skips heavy daily-bar
+    picker re-runs -- those are still postclose only via generate_analysis.
+    """
+    while True:
+        time.sleep(REALTIME_REBALANCE_INTERVAL_SEC)
+        if not is_market_hours():
+            continue
+        try:
+            # Lazy imports inside loop to avoid import order weirdness at startup
+            from paper.portfolio import PaperPortfolio
+            from paper.runner import intraday_rebalance
+            from paper.position_mgmt import manage_positions
+            import json as _json
+            from pathlib import Path as _P
+            pf = PaperPortfolio()
+            held = pf.get_open_symbols()
+            if not held:
+                continue
+            # Reuse marker's price cache as primary LTP source (no extra fetches)
+            from streaming.paper_marker import get_marker as _gm
+            ltps = dict(_gm()._prices)
+            # Position mgmt (stops/targets are now per-tick in paper_marker;
+            # this still handles time-exit + trailing for held names whose
+            # ATR proxy doesn't have a target_price).
+            manage_positions(pf, ltps)
+            # Intraday rebalance using current picker JSON
+            picks_path = _P(__file__).resolve().parent.parent.parent / "data" / "stocks.json"
+            if picks_path.exists():
+                try:
+                    picker_out = _json.loads(picks_path.read_text(encoding="utf-8"))
+                    intraday_rebalance(pf, picker_out, ltps)
+                except Exception as e:
+                    logger.debug(f"realtime intraday_rebalance failed: {e}")
+        except Exception as e:
+            logger.warning(f"realtime_rebalance_loop iteration error: {e}")
+
+
 def main_loop():
     logger.info("Artha WS streamer starting")
     refresher = threading.Thread(target=subscription_refresher, daemon=True)
     refresher.start()
     watchdog = threading.Thread(target=_stall_watchdog, daemon=True)
     watchdog.start()
+    rebalancer = threading.Thread(target=realtime_rebalance_loop, daemon=True)
+    rebalancer.start()
 
     while True:
         if not is_market_hours():
