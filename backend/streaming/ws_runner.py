@@ -257,6 +257,27 @@ def main_loop():
 
     while True:
         if not is_market_hours():
+            # Wake up earlier when market is about to open: poll every 30s
+            # in the 09:14-09:15 IST window so we're connected by 09:15:00 and
+            # the dashboard never reports "down" during the open. Otherwise the
+            # 5-min sleep cycle could leave us sleeping until 09:17, missing
+            # the first 2 min of session.
+            from common.market_hours import now_ist as _now_ist
+            ist = _now_ist()
+            mins_to_open = (9 * 60 + 15) - (ist.hour * 60 + ist.minute)
+            # If within 1 min of market open AND on a weekday, poll fast
+            if 0 <= mins_to_open <= 1 and ist.weekday() < 5:
+                logger.info(f"Pre-open window: sleeping 30s (open in {mins_to_open}min)")
+                # Close socket if still open
+                if state.ws is not None:
+                    try:
+                        state.ws.close_connection()
+                    except Exception:
+                        pass
+                    state.ws = None
+                    state.subscribed_tokens.clear()
+                time.sleep(30)
+                continue
             logger.info("Outside market hours; sleeping 5 min")
             # Close socket if open
             if state.ws is not None:

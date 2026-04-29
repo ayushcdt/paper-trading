@@ -155,6 +155,12 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
         if result:
             out["closed"].append({"symbol": sym, "price": price, "pnl_inr": result.get("pnl_inr", 0)})
             logger.info(f"INTRADAY SWAP_OUT {sym} @ Rs{price:.2f}  pnl Rs{result.get('pnl_inr', 0):+.0f}")
+            try:
+                from alerts.channels import dispatch
+                dispatch("info", f"SWAP_OUT {sym}",
+                         f"Closed at Rs{price:.2f}, P&L Rs{result.get('pnl_inr', 0):+.0f}\nReason: dropped from picks (intraday)")
+            except Exception:
+                pass
 
     # SECOND PATH: intraday-strength swap.
     # Swap a held position for a non-held candidate based on intraday momentum

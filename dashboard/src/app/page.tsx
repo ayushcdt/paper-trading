@@ -2,6 +2,7 @@ import { getAnalysisData } from '@/lib/data'
 import { LivePriceCard } from '@/components/LivePriceCard'
 import { HomeNewsCard } from '@/components/HomeNewsCard'
 import { RiskOverlayCard } from '@/components/RiskOverlayCard'
+import { IntradayActivityFeed } from '@/components/IntradayActivityFeed'
 import {
   TrendingUp,
   TrendingDown,
@@ -103,6 +104,9 @@ export default async function Dashboard() {
 
       {/* Risk overlay status */}
       <RiskOverlayCard />
+
+      {/* Intraday activity feed */}
+      <IntradayActivityFeed />
 
       {/* News flow card */}
       <HomeNewsCard />
