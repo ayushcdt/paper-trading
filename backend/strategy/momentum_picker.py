@@ -298,20 +298,31 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[
     # Trim to max_picks
     final_picks_objs = capped[:max_picks]
 
-    # Convert to dict shape generate_analysis expects
+    # Convert to dict shape generate_analysis expects.
+    # Targets are ATR-based (3x ATR for momentum) instead of a flat 10% — gives
+    # high-volatility names more room and tightens up low-vol names so we don't
+    # leave money on the table or force premature exits.
+    TARGET_ATR_MULT_MOMENTUM = 3.0
     picks_dicts = []
     for rank, p in enumerate(final_picks_objs, 1):
+        atr_val = float(getattr(p, "atr", 0.0) or 0.0)
+        if atr_val > 0:
+            target = float(p.entry_ref) + TARGET_ATR_MULT_MOMENTUM * atr_val
+        else:
+            target = float(p.entry_ref) * 1.10  # fallback when ATR unavailable
+        upside_pct = (target - float(p.entry_ref)) / float(p.entry_ref) * 100 if p.entry_ref else 0
         picks_dicts.append({
             "rank": rank,
             "symbol": p.symbol,
             "name": p.symbol,            # full company name not stored on Pick; symbol is fine for now
             "sector": _industry_of(p.symbol),
             "cmp": float(p.entry_ref),
-            "target": round(float(p.entry_ref) * 1.10, 2),
-            "target_2": round(float(p.entry_ref) * 1.15, 2),
+            "target": round(target, 2),
+            "target_2": round(float(p.entry_ref) + 1.5 * TARGET_ATR_MULT_MOMENTUM * atr_val, 2) if atr_val > 0 else round(float(p.entry_ref) * 1.15, 2),
             "stop_loss": float(p.stop),
+            "atr": round(atr_val, 2),
             "risk_pct": round((float(p.entry_ref) - float(p.stop)) / float(p.entry_ref) * 100, 2) if p.entry_ref else 0,
-            "upside_pct": 10.0,
+            "upside_pct": round(upside_pct, 2),
             "conviction": "HIGH" if rank <= 3 else ("MEDIUM" if rank <= 7 else "LOW"),
             "scores": {"quality": None, "momentum": round(p.score, 2), "technical": None, "overall": round(p.score, 2)},
             "momentum": {"rs_6m": p.score, "rs_3m": p.score / 2},

@@ -34,6 +34,10 @@ class PaperMarker:
         self._lock = threading.Lock()
         self._prices: dict[str, float] = {}         # symbol -> latest LTP
         self._held: set[str] = set()                # symbols we actually have positions in
+        # Cached stop/target levels per held symbol — refreshed by refresh_held().
+        # Format: {symbol: {"stop": float, "target": float, "variant": str, "entry": float}}
+        # Per-tick stop/target check uses this so we don't hit SQLite on every tick.
+        self._levels: dict[str, dict] = {}
         self._last_push = 0.0
         self._last_db_write = 0.0
         self._pf = PaperPortfolio()
@@ -48,23 +52,78 @@ class PaperMarker:
         self.refresh_held()
 
     def refresh_held(self) -> set[str]:
-        """Re-read currently-open position symbols from the paper DB."""
+        """Re-read currently-open positions + their stop/target levels from DB."""
         try:
-            held = set(self._pf.get_open_symbols())
+            positions = self._pf.get_open_positions()
+            held = set(positions.keys())
+            levels = {}
+            for sym, pos in positions.items():
+                stop = pos.current_stop or pos.stop_at_entry or 0.0
+                target = pos.target_price or 0.0
+                levels[sym] = {
+                    "stop": float(stop),
+                    "target": float(target),
+                    "variant": pos.variant,
+                    "entry": float(pos.entry_price),
+                }
             with self._lock:
                 self._held = held
+                self._levels = levels
             return held
         except Exception as e:
             logger.warning(f"PaperMarker refresh_held error: {e}")
             return set()
 
     def update_tick(self, symbol: str, ltp: float) -> None:
-        """Called by WS on_data callback for any ticked symbol."""
+        """Called by WS on_data callback for any ticked symbol.
+        Also checks stop/target per tick (sub-second latency vs the old 15-min
+        scheduled mark_to_market check)."""
         if symbol not in self._held or ltp <= 0:
             return
         with self._lock:
             self._prices[symbol] = ltp
+            lvl = self._levels.get(symbol)
+        # Per-tick stop/target check — fires immediately when crossed
+        if lvl:
+            self._check_stop_target(symbol, ltp, lvl)
         self._maybe_push()
+
+    def _check_stop_target(self, symbol: str, ltp: float, lvl: dict) -> None:
+        """Fire close if ltp crossed stop or target. Drops symbol from _held
+        on success so we don't refire before refresh_held picks up DB state."""
+        stop = lvl.get("stop", 0.0)
+        target = lvl.get("target", 0.0)
+        entry = lvl.get("entry", 0.0)
+        hit_stop = stop > 0 and ltp <= stop
+        hit_target = target > 0 and ltp >= target
+        if not (hit_stop or hit_target):
+            return
+        # Remove from _held FIRST under lock so concurrent ticks don't refire
+        with self._lock:
+            if symbol not in self._held:
+                return  # already fired by another tick
+            self._held.discard(symbol)
+            self._levels.pop(symbol, None)
+        # Now close outside the lock
+        try:
+            pnl_pct = (ltp - entry) / entry * 100 if entry else 0.0
+            if hit_stop:
+                reason = f"per-tick stop hit (Rs{ltp:.2f} <= stop Rs{stop:.2f}, P&L {pnl_pct:+.2f}%)"
+                severity, label = "warning", "STOP HIT"
+            else:
+                reason = f"per-tick target hit (Rs{ltp:.2f} >= target Rs{target:.2f}, P&L {pnl_pct:+.2f}%)"
+                severity, label = "info", "TARGET HIT"
+            result = self._pf.close_position(symbol, ltp, reason)
+            if result:
+                logger.info(f"PER-TICK {label}: {symbol} @ Rs{ltp:.2f}  P&L Rs{result.get('pnl_inr', 0):+.0f}")
+                try:
+                    from alerts.channels import dispatch
+                    dispatch(severity, f"{label}: {symbol}",
+                             f"Closed at Rs{ltp:.2f}\nP&L: Rs{result.get('pnl_inr', 0):+.0f} ({pnl_pct:+.2f}%)\nReason: {reason}")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"per-tick close failed for {symbol}: {e}")
 
     def _maybe_push(self) -> None:
         now = time.time()

@@ -168,9 +168,13 @@ def _intraday_opportunity_pass(pf: PaperPortfolio):
                 if cost > cash_available:
                     continue
                 stop = ltp * (1 - 0.015 * 1.5)  # 1.5x ATR proxy = 2.25% stop
+                # Catalyst target: tighter than momentum (N=2 ATR proxy ~ +3%) since
+                # news pops fade fast. Picker doesn't supply ATR for catalyst opens
+                # so use ltp * (1 + 0.015 * 2) = +3% as a proxy.
+                target = ltp * (1 + 0.015 * 2)
                 pos = pf.open_position(
                     symbol=c.symbol, variant="catalyst", regime="CATALYST",
-                    entry_price=ltp, slot_notional=cost, stop=stop,
+                    entry_price=ltp, slot_notional=cost, stop=stop, target=target,
                     reason=f"catalyst_open: {c.catalyst_kind} ({c.matched_articles} arts/{c.distinct_sources} src)",
                 )
                 if pos:

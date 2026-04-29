@@ -73,6 +73,18 @@ class PaperPortfolio:
                     c.execute(ddl)
                 except sqlite3.OperationalError:
                     pass
+            # trade_log additive migrations for real-money fees breakdown.
+            # is_intraday: 1 if open+close on same date, else 0 (delivery)
+            # real_fee_inr: total fees for THIS leg (close stores round-trip total)
+            for ddl in [
+                "ALTER TABLE trade_log ADD COLUMN is_intraday INTEGER DEFAULT 0",
+                "ALTER TABLE trade_log ADD COLUMN real_fee_inr REAL DEFAULT 0",
+                "ALTER TABLE trade_log ADD COLUMN fee_breakdown_json TEXT",
+            ]:
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
             c.executescript("""
 
                 CREATE TABLE IF NOT EXISTS trade_log (
@@ -206,10 +218,15 @@ class PaperPortfolio:
         stop: float,
         entry_time: Optional[str] = None,
         reason: str = "new pick",
+        target: Optional[float] = None,
     ) -> Optional[Position]:
         """Open a new paper position. Returns None if the slot can't afford
         even 1 share at the given entry_price (was previously max(1,...) which
-        created fictional leveraged positions — see commit fixing 'A')."""
+        created fictional leveraged positions — see commit fixing 'A').
+
+        target: explicit target price. If None, falls back to entry × 1.10
+        (legacy behaviour). Picker now supplies ATR-based targets per variant
+        — see strategy/momentum_picker.py."""
         if entry_price <= 0:
             return None
         qty = int(slot_notional / entry_price)
@@ -217,9 +234,7 @@ class PaperPortfolio:
             return None
         when_iso = entry_time or datetime.now().isoformat()
         when_date = when_iso[:10]
-        # Default target = entry × 1.10 (10% target). Picker can override later
-        # if it provides a different target_price in the pick dict.
-        target_price = entry_price * 1.10
+        target_price = float(target) if target and target > entry_price else entry_price * 1.10
         current_stop = stop  # initial = stop_at_entry; trailing logic raises later
         pos = Position(
             symbol=symbol, variant=variant, regime_at_entry=regime,
@@ -335,22 +350,40 @@ class PaperPortfolio:
         if not open_pos:
             return None
         gross_pnl = (exit_price - open_pos.entry_price) * open_pos.qty
-        # Apply round-trip cost on notional
+        # Apply round-trip cost on notional (legacy flat 0.4% — kept for backtest parity)
         cost = open_pos.slot_notional * (COST_PCT / 100)
         pnl_inr = gross_pnl - cost
         pnl_pct = (pnl_inr / open_pos.slot_notional) * 100 if open_pos.slot_notional > 0 else 0
         now = datetime.now()
+
+        # Real-money fee breakdown (Indian discount-broker model)
+        from common.fees import compute_round_trip_fees
+        try:
+            entry_date = open_pos.entry_date[:10]
+        except Exception:
+            entry_date = now.strftime("%Y-%m-%d")
+        is_intraday = entry_date == now.strftime("%Y-%m-%d")
+        fee_b = compute_round_trip_fees(
+            buy_price=open_pos.entry_price, sell_price=exit_price,
+            qty=open_pos.qty, is_intraday=is_intraday,
+        )
+        fee_dict = fee_b.as_dict()
+        import json as _json
+
         with self._conn() as c:
             c.execute(
-                "INSERT INTO trade_log (symbol, variant, regime, action, price, qty, pnl_inr, pnl_pct, reason, timestamp, date) "
-                "VALUES (?, ?, ?, 'CLOSE', ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO trade_log (symbol, variant, regime, action, price, qty, pnl_inr, pnl_pct, reason, timestamp, date, is_intraday, real_fee_inr, fee_breakdown_json) "
+                "VALUES (?, ?, ?, 'CLOSE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (symbol, open_pos.variant, open_pos.regime_at_entry, exit_price,
-                 open_pos.qty, pnl_inr, pnl_pct, reason, now.isoformat(), now.strftime("%Y-%m-%d")),
+                 open_pos.qty, pnl_inr, pnl_pct, reason, now.isoformat(), now.strftime("%Y-%m-%d"),
+                 1 if is_intraday else 0, fee_b.total, _json.dumps(fee_dict)),
             )
             c.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
         return {
             "symbol": symbol, "entry": open_pos.entry_price, "exit": exit_price,
             "pnl_inr": pnl_inr, "pnl_pct": pnl_pct, "reason": reason,
+            "real_fee_inr": fee_b.total, "is_intraday": is_intraday,
+            "fee_breakdown": fee_dict,
         }
 
     def mark_to_market(self, latest_prices: dict[str, float]) -> int:
@@ -401,6 +434,68 @@ class PaperPortfolio:
 
     # ---------- Export for dashboard ---------------------------------------
 
+    def fees_summary(self) -> dict:
+        """Aggregate real-money fees paid across all CLOSE trades.
+        Compares to the flat 0.4% cost model the system applies internally
+        so dashboard can show real-money headwind explicitly."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT COALESCE(SUM(real_fee_inr), 0), "
+                "       COALESCE(SUM(CASE WHEN is_intraday=1 THEN real_fee_inr ELSE 0 END), 0), "
+                "       COALESCE(SUM(CASE WHEN is_intraday=0 THEN real_fee_inr ELSE 0 END), 0), "
+                "       COUNT(*), "
+                "       COALESCE(SUM(CASE WHEN is_intraday=1 THEN 1 ELSE 0 END), 0), "
+                "       COALESCE(SUM(price * qty), 0) "
+                "FROM trade_log WHERE action='CLOSE'"
+            ).fetchone()
+            recent = c.execute(
+                "SELECT symbol, date, is_intraday, real_fee_inr, fee_breakdown_json, price, qty, pnl_inr "
+                "FROM trade_log WHERE action='CLOSE' AND real_fee_inr > 0 "
+                "ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+            # Flat estimate that internal P&L already deducts (COST_PCT on slot_notional)
+            flat_row = c.execute(
+                "SELECT COALESCE(SUM(slot_notional), 0) FROM positions"
+            ).fetchone()
+        total_real, intraday_real, delivery_real, n_close, n_intraday, sell_notional = rows
+        recent_list = []
+        import json as _json
+        for r in recent:
+            try:
+                breakdown = _json.loads(r[4]) if r[4] else {}
+            except Exception:
+                breakdown = {}
+            recent_list.append({
+                "symbol": r[0], "date": r[1],
+                "is_intraday": bool(r[2]),
+                "real_fee_inr": round(float(r[3] or 0), 2),
+                "breakdown": breakdown,
+                "exit_notional": round(float(r[5] or 0) * int(r[6] or 0), 2),
+                "pnl_inr": round(float(r[7] or 0), 2),
+            })
+        # Reconstruct flat-cost estimate the system already deducted from realized P&L
+        with self._conn() as c:
+            est_row = c.execute(
+                "SELECT COALESCE(SUM(price * qty), 0) FROM trade_log WHERE action='OPEN'"
+            ).fetchone()
+        buy_notional_total = float(est_row[0]) if est_row else 0.0
+        # Note: COST_PCT is applied on slot_notional at close time (== buy notional roughly).
+        # But only for closed trades. So flat-estimate cumulative ~= COST_PCT * sum(buy_notional of closed trades).
+        # Approximate: count = n_close, but we don't have per-trade slot easily. Use exit-side notional as proxy.
+        flat_estimate_total = float(sell_notional) * (COST_PCT / 100)
+        return {
+            "total_real_fees_inr": round(float(total_real), 2),
+            "intraday_fees_inr": round(float(intraday_real), 2),
+            "delivery_fees_inr": round(float(delivery_real), 2),
+            "n_closes": int(n_close),
+            "n_intraday_closes": int(n_intraday),
+            "n_delivery_closes": int(n_close) - int(n_intraday),
+            "flat_estimate_inr": round(flat_estimate_total, 2),
+            "real_vs_flat_inr": round(float(total_real) - flat_estimate_total, 2),
+            "avg_fee_per_close_inr": round(float(total_real) / int(n_close), 2) if n_close else 0,
+            "recent_trades": recent_list,
+        }
+
     def export_snapshot(self, latest_prices: dict[str, float]):
         open_pos = self.get_open_positions()
         realized = self.get_realized_pnl_total()
@@ -439,6 +534,7 @@ class PaperPortfolio:
             "recent_trades": self.trade_log(limit=50),
             "live_3m_return_by_variant": self.live_3m_return_by_variant(),
             "equity_curve": self.equity_curve(days=90),
+            "fees_summary": self.fees_summary(),
         }
 
         EXPORT_PATH.parent.mkdir(parents=True, exist_ok=True)

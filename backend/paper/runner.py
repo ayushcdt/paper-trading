@@ -62,13 +62,14 @@ def _live_prices(symbols: list[str]) -> dict[str, float]:
 
 # ---------- Intraday rebalance config ----------
 # min-hold-days dropped from 1 to 0 on 2026-04-29: real traders cut same-day
-# when signal proves wrong. Whipsaw risk now controlled by strength-gap
-# requirement (8+ composite points) and max-3-swaps-per-day cap. If we see
-# excessive churn/cost, raise back to 1 OR add asymmetric rule (allow close
-# only if position is in loss > X%).
+# when signal proves wrong.
+# max-swaps-per-day cap REMOVED on 2026-04-29: original 0.4%/swap friction
+# math was wrong (that's delivery roundtrip; intraday swap is ~0.1%). The
+# 8-point strength-gap guard already filters whipsaw, so the swap cap was
+# a redundant arbitrary brake. If signal noise becomes a problem, tighten
+# INTRADAY_STRENGTH_GAP_REQUIRED from 8 -> 10 instead.
 INTRADAY_MIN_HOLD_DAYS = 0
-INTRADAY_MAX_SWAPS_PER_DAY = 3      # cap churn (max 3 round-trips/day = ~2.4% friction worst case)
-INTRADAY_SKIP_LAST_MINUTES = 30     # don't swap in last 30min of session
+INTRADAY_SKIP_LAST_MINUTES = 30     # don't swap in last 30min of session (avoid bad fills)
 # Intraday-strength-based swap thresholds:
 INTRADAY_CANDIDATE_MIN_STRENGTH = 8.0    # candidate must be clearly strong (composite > +8)
 INTRADAY_STRENGTH_GAP_REQUIRED = 8.0     # candidate must beat weakest held by this many composite points
@@ -140,13 +141,9 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
             continue
         eligible_drops.append(sym)
 
-    # Apply max-swaps-per-day cap
-    today_swaps = _today_swap_count(pf)
-    swap_budget = max(0, INTRADAY_MAX_SWAPS_PER_DAY - today_swaps)
-    if today_swaps >= INTRADAY_MAX_SWAPS_PER_DAY:
-        out["skipped_reasons"].append(f"hit daily swap cap ({INTRADAY_MAX_SWAPS_PER_DAY})")
-        return out
-    eligible_drops = eligible_drops[:swap_budget]
+    # No daily swap cap -- strength-gap guard (8+ composite points) handles whipsaw.
+    today_swaps = _today_swap_count(pf)  # kept for telemetry/log only
+    swap_budget = len(eligible_drops)
 
     # Execute drops first to free cash
     for sym in eligible_drops:
@@ -220,10 +217,13 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
                             if qty > 0:
                                 cost = qty * strong_price
                                 stop = strong_price * 0.97  # tight 3% stop on intraday strength entries
+                                # intraday_strength target: very tight (~2.25% above) since
+                                # the signal is intraday-only and the move is already in progress
+                                target = strong_price * 1.0225
                                 pos_new = pf.open_position(
                                     symbol=strongest_cand.symbol, variant="intraday_strength",
                                     regime="INTRADAY", entry_price=strong_price,
-                                    slot_notional=cost, stop=stop,
+                                    slot_notional=cost, stop=stop, target=target,
                                     reason=f"intraday strength swap (composite +{strongest_cand.composite_strength:.1f}, breakout={strongest_cand.breakout_20d}, total {strongest_cand.total_pct:+.2f}%)")
                                 if pos_new:
                                     out["opened"].append({"symbol": strongest_cand.symbol, "price": strong_price, "qty": qty, "notional": cost})
@@ -243,13 +243,26 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
     current_equity = pf.current_equity(latest_prices)
     cash_available = max(0.0, current_equity - held_notional)
 
-    # Open candidates: picks not yet held (greedy fill same as main loop)
+    # Open candidates: picks not yet held (greedy fill same as main loop).
+    # CRITICAL: pick["cmp"] is the entry_ref captured when the picker JSON was
+    # written (often hours earlier at postclose). For an intraday rebalance
+    # firing at 11:30, that price is stale -- use a fresh LTP. Falls back to
+    # cmp only if live fetch fails.
+    fetcher = get_fetcher()
+    if not fetcher.logged_in:
+        fetcher.login()
     add_candidates = []
     for pick in new_picks:
         sym = pick["symbol"]
         if sym in held_syms:
             continue
-        entry_price = float(pick.get("cmp", latest_prices.get(sym, 0)))
+        live_ltp = latest_prices.get(sym, 0.0)
+        if live_ltp <= 0:
+            try:
+                live_ltp = float(fetcher.get_ltp(sym).get("ltp", 0))
+            except Exception:
+                live_ltp = 0.0
+        entry_price = live_ltp if live_ltp > 0 else float(pick.get("cmp", 0))
         if entry_price <= 0:
             continue
         add_candidates.append((pick, entry_price))
@@ -273,6 +286,7 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
             symbol=sym, variant=pick.get("variant") or variant_chosen,
             regime=regime, entry_price=entry_price, slot_notional=cost,
             stop=stop, reason="intraday swap (new pick)",
+            target=float(pick.get("target", 0)) or None,
         )
         if pos is None:
             continue
@@ -379,13 +393,20 @@ def run_paper_runner() -> dict:
         held_notional = sum(p.qty * p.entry_price for p in open_positions.values())
         cash_available = max(0.0, current_equity - held_notional)
 
-        # Filter to candidates that aren't already held / pending
+        # Filter to candidates that aren't already held / pending.
+        # During market hours: use fresh LTP (prices dict was fetched live at
+        # top of run_paper_runner) so we don't open at stale picker JSON cmp.
+        # Off-hours: pick["cmp"] is fine -- it'll get re-priced at next open
+        # via the pending_open fill mechanism.
         candidates = []
         for pick in new_picks:
             sym = pick["symbol"]
             if sym in open_syms or sym in already_pending:
                 continue
-            entry_price = float(pick.get("cmp", prices.get(sym, 0)))
+            if market_open:
+                entry_price = float(prices.get(sym, 0)) or float(pick.get("cmp", 0))
+            else:
+                entry_price = float(pick.get("cmp", 0))
             if entry_price <= 0:
                 continue
             candidates.append((pick, entry_price))
@@ -427,7 +448,7 @@ def run_paper_runner() -> dict:
                 pos = pf.open_position(
                     symbol=sym, variant=variant_for_pick, regime=regime,
                     entry_price=entry_price, slot_notional=cost,
-                    stop=stop,
+                    stop=stop, target=float(pick.get("target", 0)) or None,
                 )
                 if pos is None:
                     logger.info(f"Skipped {sym}: open_position rejected qty={qty} at Rs{entry_price:.2f}")

@@ -91,6 +91,7 @@ class Pick:
     stop: float
     entry_ref: float  # reference price at pick time
     variant: str
+    atr: float = 0.0  # ATR(20) at pick time -- used to size dynamic targets per variant
 
 
 @dataclass
@@ -165,7 +166,8 @@ class MomentumAgg:
             low20 = float(df.iloc[max(0, li - 19) : li + 1]["Low"].min())
             ema50 = float(ema(close, 50).iloc[-1])
             stop = max(low20, ema50)
-            picks.append(Pick(sym, s, rank, stop, float(close.iloc[-1]), self.name))
+            atr20 = atr(df.iloc[: li + 1], period=20) or 0.0
+            picks.append(Pick(sym, s, rank, stop, float(close.iloc[-1]), self.name, atr=atr20))
         return picks
 
     def check_exit(self, df, entry_price, entry_idx, current_idx, current_rank):
