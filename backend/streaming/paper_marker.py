@@ -76,32 +76,44 @@ class PaperMarker:
 
     def update_tick(self, symbol: str, ltp: float) -> None:
         """Called by WS on_data callback for any ticked symbol.
-        Also checks stop/target per tick (sub-second latency vs the old 15-min
-        scheduled mark_to_market check)."""
+        Per-tick (sub-second) does THREE things:
+          1. update LTP cache
+          2. check stop/target hit -> close
+          3. check trailing-stop levels -> raise stop in DB + cache
+        All previously batched into the 15-min mark_to_market run.
+        """
         if symbol not in self._held or ltp <= 0:
             return
         with self._lock:
             self._prices[symbol] = ltp
             lvl = self._levels.get(symbol)
-        # Per-tick stop/target check — fires immediately when crossed
-        if lvl:
-            self._check_stop_target(symbol, ltp, lvl)
+        if not lvl:
+            self._maybe_push()
+            return
+        # 1. Stop/target hit -> close (fires first; if it fires, position is gone)
+        if self._check_stop_target(symbol, ltp, lvl):
+            self._maybe_push()
+            return
+        # 2. Trailing stop raise -> update current_stop if a new level was crossed
+        self._check_trailing(symbol, ltp, lvl)
         self._maybe_push()
 
-    def _check_stop_target(self, symbol: str, ltp: float, lvl: dict) -> None:
-        """Fire close if ltp crossed stop or target. Drops symbol from _held
-        on success so we don't refire before refresh_held picks up DB state."""
+    def _check_stop_target(self, symbol: str, ltp: float, lvl: dict) -> bool:
+        """Fire close if ltp crossed stop or target. Returns True if fired
+        (caller should skip subsequent checks like trailing). Drops symbol
+        from _held on success so we don't refire before refresh_held picks
+        up DB state."""
         stop = lvl.get("stop", 0.0)
         target = lvl.get("target", 0.0)
         entry = lvl.get("entry", 0.0)
         hit_stop = stop > 0 and ltp <= stop
         hit_target = target > 0 and ltp >= target
         if not (hit_stop or hit_target):
-            return
+            return False
         # Remove from _held FIRST under lock so concurrent ticks don't refire
         with self._lock:
             if symbol not in self._held:
-                return  # already fired by another tick
+                return True  # already fired by another tick
             self._held.discard(symbol)
             self._levels.pop(symbol, None)
         # Now close outside the lock
@@ -124,6 +136,53 @@ class PaperMarker:
                     pass
         except Exception as e:
             logger.warning(f"per-tick close failed for {symbol}: {e}")
+        return True
+
+    def _check_trailing(self, symbol: str, ltp: float, lvl: dict) -> None:
+        """Per-tick trailing-stop raise. Mirrors paper.position_mgmt logic
+        so stops snap up the moment a level is crossed -- no 15-min wait.
+        Levels (matching position_mgmt):
+          gain >= 1x ATR_proxy -> stop = entry (breakeven)
+          gain >= 2x ATR_proxy -> stop = entry + 0.5x ATR (lock half)
+        ATR_proxy = (target - entry) / 3.0 (P6 design). Falls back to
+        fixed pct (1.5% / 3%) if no target."""
+        entry = lvl.get("entry", 0.0)
+        if entry <= 0 or ltp <= entry:
+            return
+        target = lvl.get("target", 0.0)
+        current_stop = lvl.get("stop", 0.0)
+        gain = ltp - entry
+        new_stop = current_stop
+        if target > entry:
+            atr_proxy = (target - entry) / 3.0
+            if gain >= 2.0 * atr_proxy:
+                candidate = entry + 0.5 * atr_proxy
+                if candidate > new_stop:
+                    new_stop = candidate
+            elif gain >= 1.0 * atr_proxy:
+                if entry > new_stop:
+                    new_stop = entry  # breakeven
+        else:
+            pnl_pct = gain / entry * 100
+            if pnl_pct >= 3.0:
+                candidate = entry + 0.5 * gain
+                if candidate > new_stop:
+                    new_stop = candidate
+            elif pnl_pct >= 1.5:
+                if entry > new_stop:
+                    new_stop = entry
+        if new_stop <= current_stop:
+            return
+        # Persist to DB + update cache
+        try:
+            self._pf.update_position_stop_target(symbol, new_stop=new_stop)
+        except Exception as e:
+            logger.warning(f"per-tick trailing update failed for {symbol}: {e}")
+            return
+        with self._lock:
+            if symbol in self._levels:
+                self._levels[symbol]["stop"] = new_stop
+        logger.info(f"PER-TICK TRAILING: {symbol} stop Rs{current_stop:.2f} -> Rs{new_stop:.2f} (ltp Rs{ltp:.2f}, gain {gain/entry*100:+.2f}%)")
 
     def _maybe_push(self) -> None:
         now = time.time()
