@@ -62,8 +62,11 @@ def _live_prices(symbols: list[str]) -> dict[str, float]:
 
 # ---------- Intraday rebalance config ----------
 INTRADAY_MIN_HOLD_DAYS = 1          # don't swap a position opened today
-INTRADAY_MAX_SWAPS_PER_DAY = 2      # cap churn
+INTRADAY_MAX_SWAPS_PER_DAY = 3      # cap churn (raised from 2 -- intraday signals can fire more)
 INTRADAY_SKIP_LAST_MINUTES = 30     # don't swap in last 30min of session
+# Intraday-strength-based swap thresholds:
+INTRADAY_CANDIDATE_MIN_STRENGTH = 8.0    # candidate must be clearly strong (composite > +8)
+INTRADAY_STRENGTH_GAP_REQUIRED = 8.0     # candidate must beat weakest held by this many composite points
 
 
 def _today_swap_count(pf: PaperPortfolio) -> int:
@@ -147,6 +150,76 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
         if result:
             out["closed"].append({"symbol": sym, "price": price, "pnl_inr": result.get("pnl_inr", 0)})
             logger.info(f"INTRADAY SWAP_OUT {sym} @ Rs{price:.2f}  pnl Rs{result.get('pnl_inr', 0):+.0f}")
+
+    # SECOND PATH: intraday-strength swap.
+    # Swap a held position for a non-held candidate based on intraday momentum
+    # signals (today's gap + move + breakout), independent of daily-bar picks.
+    # This fires even when picks haven't changed -- captures stocks moving NOW.
+    if swap_budget - len(out["closed"]) > 0:
+        try:
+            from strategy.intraday_signals import rank_intraday
+            from data_fetcher import SYMBOL_TOKENS, get_fetcher
+            # Fetch LTPs for held + a sample of universe (top-100 by recent activity)
+            f = get_fetcher()
+            if not f.logged_in:
+                f.login()
+            sample_universe = list(set(SYMBOL_TOKENS.keys()) - held_syms)[:100]
+            sample_ltps = dict(latest_prices)
+            for sym in sample_universe:
+                if sym in sample_ltps:
+                    continue
+                try:
+                    ltp = float(f.get_ltp(sym).get("ltp", 0))
+                    if ltp > 0:
+                        sample_ltps[sym] = ltp
+                except Exception:
+                    pass
+            held_after = pf.get_open_positions()
+            held_features = rank_intraday(list(held_after.keys()), sample_ltps)
+            cand_features = rank_intraday(sample_universe, sample_ltps)
+            # Identify weakest held + strongest candidate
+            weakest_held = held_features[-1] if held_features else None
+            strongest_cand = cand_features[0] if cand_features else None
+            if (weakest_held and strongest_cand
+                and strongest_cand.composite_strength >= INTRADAY_CANDIDATE_MIN_STRENGTH
+                and (strongest_cand.composite_strength - weakest_held.composite_strength) >= INTRADAY_STRENGTH_GAP_REQUIRED):
+                # Apply min-holding-period guard
+                pos = held_after[weakest_held.symbol]
+                try:
+                    entry_date = datetime.fromisoformat(pos.entry_date).date()
+                except Exception:
+                    entry_date = today
+                if (today - entry_date).days >= INTRADAY_MIN_HOLD_DAYS:
+                    # Execute the strength swap
+                    weak_price = sample_ltps.get(weakest_held.symbol, pos.entry_price)
+                    strong_price = sample_ltps.get(strongest_cand.symbol)
+                    if strong_price and strong_price > 0:
+                        result = pf.close_position(weakest_held.symbol, weak_price,
+                            f"intraday strength swap (held {weakest_held.composite_strength:+.1f}, replaced by {strongest_cand.symbol} {strongest_cand.composite_strength:+.1f})")
+                        if result:
+                            out["closed"].append({"symbol": weakest_held.symbol, "price": weak_price, "pnl_inr": result.get("pnl_inr", 0)})
+                            logger.info(f"INTRADAY STRENGTH SWAP_OUT {weakest_held.symbol} (strength {weakest_held.composite_strength:+.1f}) -> intend SWAP_IN {strongest_cand.symbol} (strength {strongest_cand.composite_strength:+.1f})")
+                            # Open the strong candidate using greedy fill
+                            current_equity_now = pf.current_equity(sample_ltps)
+                            held_now = pf.get_open_positions()
+                            held_notional_now = sum(p.qty * p.entry_price for p in held_now.values())
+                            cash_now = max(0.0, current_equity_now - held_notional_now)
+                            target_slot = current_equity_now / 10
+                            qty = min(max(1, int(target_slot / strong_price)), int(cash_now / strong_price))
+                            if qty > 0:
+                                cost = qty * strong_price
+                                stop = strong_price * 0.97  # tight 3% stop on intraday strength entries
+                                pos_new = pf.open_position(
+                                    symbol=strongest_cand.symbol, variant="intraday_strength",
+                                    regime="INTRADAY", entry_price=strong_price,
+                                    slot_notional=cost, stop=stop,
+                                    reason=f"intraday strength swap (composite +{strongest_cand.composite_strength:.1f}, breakout={strongest_cand.breakout_20d}, total {strongest_cand.total_pct:+.2f}%)")
+                                if pos_new:
+                                    out["opened"].append({"symbol": strongest_cand.symbol, "price": strong_price, "qty": qty, "notional": cost})
+                                    logger.info(f"INTRADAY STRENGTH SWAP_IN {strongest_cand.symbol} qty={qty} @ Rs{strong_price:.2f}")
+        except Exception as e:
+            import traceback
+            logger.warning(f"intraday strength swap failed: {e}\n{traceback.format_exc()[:300]}")
 
     if not out["closed"]:
         # No drops -> nothing to do; openings only happen if we freed up cash
