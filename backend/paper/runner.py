@@ -74,6 +74,18 @@ INTRADAY_SKIP_LAST_MINUTES = 30     # don't swap in last 30min of session (avoid
 INTRADAY_CANDIDATE_MIN_STRENGTH = 8.0    # candidate must be clearly strong (composite > +8)
 INTRADAY_STRENGTH_GAP_REQUIRED = 8.0     # candidate must beat weakest held by this many composite points
 
+# P10 Concentration mode (2026-04-29):
+# When ANY held position rallies past CONCENTRATE_LEADER_THRESHOLD_PCT intraday,
+# rotate cash from FLAT/RED positions (composite_strength < CONCENTRATE_LAGGARD_MAX_STRENGTH)
+# into the leader. Cap: leader can hold max CONCENTRATE_MAX_PORTFOLIO_PCT of equity.
+# Mechanism: today's +5.7% intraday peak happened because held names had momentum.
+# When that happens, the system should DOUBLE DOWN on the winner, not
+# diversify into laggards. Mandates the per-tick trailing stop is armed
+# (P6 already does this) so concentration risk is bounded.
+CONCENTRATE_LEADER_THRESHOLD_PCT = 3.0   # leader must be up at least this much intraday
+CONCENTRATE_LAGGARD_MAX_STRENGTH = 3.0   # only cut laggards weaker than this composite
+CONCENTRATE_MAX_PORTFOLIO_PCT = 50.0     # leader caps at this % of equity (avoid all-in)
+
 
 def _today_swap_count(pf: PaperPortfolio) -> int:
     """Count CLOSE actions today whose reason indicates a swap/rebalance (not stop/target)."""
@@ -309,7 +321,124 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
         logger.info(f"INTRADAY SWAP_IN {sym} qty={qty} @ Rs{entry_price:.2f}  (cost Rs{cost:.0f})")
         remaining_cash -= cost
 
+    # P10 CONCENTRATION MODE: if any held position is leading by >= 3% intraday,
+    # cut flat laggards and route freed cash into the leader (cap 50% equity).
+    try:
+        _concentration_pass(pf, latest_prices, out)
+    except Exception as e:
+        import traceback
+        logger.warning(f"concentration_pass failed: {e}\n{traceback.format_exc()[:300]}")
+
     return out
+
+
+def _concentration_pass(pf: PaperPortfolio, latest_prices: dict[str, float], out: dict) -> None:
+    """Detect a leader (>= +3% intraday with breakout), cut weak laggards,
+    route cash into leader. Caps leader at CONCENTRATE_MAX_PORTFOLIO_PCT."""
+    open_positions = pf.get_open_positions()
+    if len(open_positions) < 2:
+        return
+    # Get fresh LTPs for held + composite strength
+    fetcher = get_fetcher()
+    if not fetcher.logged_in:
+        if not fetcher.login():
+            return
+    ltps = dict(latest_prices)
+    for sym in open_positions:
+        if sym not in ltps:
+            try:
+                ltps[sym] = float(fetcher.get_ltp(sym).get("ltp", 0))
+            except Exception:
+                pass
+    try:
+        from strategy.intraday_signals import compute_intraday_features
+    except Exception:
+        return
+
+    # Identify leader: position with highest pnl_pct intraday AND breakout
+    leader_sym = None
+    leader_pnl_pct = 0.0
+    leader_pos = None
+    for sym, pos in open_positions.items():
+        ltp = ltps.get(sym)
+        if not ltp or pos.entry_price <= 0:
+            continue
+        pnl_pct = (ltp - pos.entry_price) / pos.entry_price * 100
+        if pnl_pct < CONCENTRATE_LEADER_THRESHOLD_PCT:
+            continue
+        # Confirm breakout via intraday features
+        try:
+            feat = compute_intraday_features(sym, ltp)
+            if feat is None or not feat.breakout_20d:
+                continue
+        except Exception:
+            continue
+        if pnl_pct > leader_pnl_pct:
+            leader_pnl_pct = pnl_pct
+            leader_sym = sym
+            leader_pos = pos
+
+    if not leader_sym:
+        return
+
+    # Check leader's current notional vs cap
+    equity = pf.current_equity(ltps)
+    leader_notional = leader_pos.qty * ltps.get(leader_sym, leader_pos.entry_price)
+    cap_notional = equity * (CONCENTRATE_MAX_PORTFOLIO_PCT / 100.0)
+    if leader_notional >= cap_notional:
+        logger.debug(f"concentration: {leader_sym} already at cap ({leader_notional:.0f}/{cap_notional:.0f})")
+        return
+
+    # Identify laggards: weak positions to cut
+    laggards: list[str] = []
+    for sym, pos in open_positions.items():
+        if sym == leader_sym:
+            continue
+        ltp = ltps.get(sym)
+        if not ltp:
+            continue
+        try:
+            feat = compute_intraday_features(sym, ltp)
+            if feat is None:
+                continue
+            if feat.composite_strength < CONCENTRATE_LAGGARD_MAX_STRENGTH:
+                laggards.append(sym)
+        except Exception:
+            continue
+
+    if not laggards:
+        return
+
+    # Cut weakest first, then add to leader
+    cash_freed = 0.0
+    for sym in laggards:
+        ltp = ltps.get(sym, 0)
+        if ltp <= 0:
+            continue
+        result = pf.close_position(sym, ltp, f"concentration: route cash to leader {leader_sym}")
+        if result:
+            cash_freed += ltp * open_positions[sym].qty
+            out["closed"].append({"symbol": sym, "price": ltp, "pnl_inr": result.get("pnl_inr", 0)})
+            logger.info(f"CONCENTRATION CUT {sym} @ Rs{ltp:.2f}  pnl Rs{result.get('pnl_inr', 0):+.0f}  "
+                        f"(routing to leader {leader_sym} +{leader_pnl_pct:.2f}%)")
+
+    # Add to leader (respecting 50% cap) via weighted-avg add_to_position
+    if cash_freed > 0:
+        leader_ltp = ltps.get(leader_sym, leader_pos.entry_price)
+        room_to_cap = max(0.0, cap_notional - leader_notional)
+        usable_cash = min(cash_freed, room_to_cap)
+        add_qty = int(usable_cash / leader_ltp)
+        if add_qty >= 1:
+            updated = pf.add_to_position(
+                leader_sym, add_price=leader_ltp, add_qty=add_qty,
+                reason=f"concentration add (leader +{leader_pnl_pct:.2f}% intraday)",
+            )
+            if updated:
+                out["opened"].append({"symbol": leader_sym, "price": leader_ltp,
+                                      "qty": add_qty, "notional": add_qty * leader_ltp})
+                logger.info(f"CONCENTRATION ADD {leader_sym} +{add_qty}sh @ Rs{leader_ltp:.2f}  "
+                            f"new entry Rs{updated.entry_price:.2f} qty={updated.qty} "
+                            f"(freed Rs{cash_freed:.0f})")
 
 
 def _next_market_open_iso() -> str:

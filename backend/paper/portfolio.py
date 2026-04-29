@@ -259,6 +259,37 @@ class PaperPortfolio:
             )
         return pos
 
+    def add_to_position(self, symbol: str, add_price: float, add_qty: int,
+                         reason: str = "concentration add") -> Optional[Position]:
+        """Average up/down: combine new shares into existing position with
+        weighted-average entry. Used by concentration mode to add to leaders.
+        Returns the updated Position (or None if symbol not held)."""
+        if add_qty <= 0 or add_price <= 0:
+            return None
+        existing = self.get_open_positions().get(symbol)
+        if not existing:
+            return None
+        new_qty = existing.qty + add_qty
+        new_entry = ((existing.entry_price * existing.qty) + (add_price * add_qty)) / new_qty
+        new_slot = existing.slot_notional + (add_price * add_qty)
+        # Re-derive target from same ATR proxy (target_distance / entry-as-mid),
+        # or just preserve old target if unchanged. Keep target_price fixed —
+        # leader has been moving, so original target still meaningful.
+        when_iso = datetime.now().isoformat()
+        with self._conn() as c:
+            c.execute(
+                "UPDATE positions SET entry_price=?, qty=?, slot_notional=? WHERE symbol=?",
+                (new_entry, new_qty, new_slot, symbol),
+            )
+            c.execute(
+                "INSERT INTO trade_log (symbol, variant, regime, action, price, qty, "
+                "pnl_inr, pnl_pct, reason, timestamp, date) "
+                "VALUES (?, ?, ?, 'OPEN', ?, ?, 0, 0, ?, ?, ?)",
+                (symbol, existing.variant, existing.regime_at_entry, add_price, add_qty,
+                 reason, when_iso, when_iso[:10]),
+            )
+        return self.get_open_positions().get(symbol)
+
     def update_position_stop_target(self, symbol: str, new_stop: Optional[float] = None,
                                      new_target: Optional[float] = None) -> None:
         """Update trailing stop or target. Caller (mark_to_market) drives this."""

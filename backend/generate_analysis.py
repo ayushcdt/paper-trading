@@ -276,6 +276,7 @@ def run_full_analysis():
         "kill_switch_active": picker_out.get("kill_switch_active"),
         "kill_switch_reason": picker_out.get("kill_switch_reason"),
         "picks": picker_out.get("picks", []),
+        "picks_extended": picker_out.get("picks_extended", []),
         "risk_overlay": picker_out.get("risk_overlay", {}),
     }
     save_local(stocks_data, "stocks.json")

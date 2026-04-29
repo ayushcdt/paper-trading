@@ -46,10 +46,17 @@ from common.market_hours import is_market_hours, now_ist
 
 
 # ---------- Config ----------------------------------------------------------
+# P9 (2026-04-29): loosened thresholds. Today missed BANDHANBNK +13% intraday
+# and the 04-27 SUNPHARMA/Organon move because both failed the 5-article gate.
+# Counter-balance: added intraday-price-confirmation gate so we don't fire on
+# rumor noise -- only opens catalyst position if the symbol is ALREADY moving
+# (today_total_pct >= MIN_INTRADAY_MOVE_PCT). This filters most false positives
+# while still catching the real catalysts the 5/3/6 thresholds were missing.
 
-MIN_ARTICLES = 5
-MIN_DISTINCT_SOURCES = 3
-LOOKBACK_HOURS = 6
+MIN_ARTICLES = 3
+MIN_DISTINCT_SOURCES = 2
+LOOKBACK_HOURS = 12
+MIN_INTRADAY_MOVE_PCT = 1.5    # require price confirmation: stock must be moving
 SKIP_LAST_MINUTES = 30
 SLOT_SIZE_FACTOR = 0.5         # 50% of normal slot
 STOP_ATR_MULTIPLIER = 1.5      # tighter than base picker
@@ -106,17 +113,25 @@ def scan_for_catalysts(
     available_cash: float,
     target_slot: float,
     risk_overlay_active: bool = False,
+    require_market_open: bool = True,
+    require_price_confirmation: bool = True,
 ) -> list[CatalystDecision]:
     """Main entry. Returns list of catalyst decisions ready to execute.
 
     Caller (mark_to_market) is responsible for actually opening the positions.
+
+    require_market_open=False: used by pre-open signal generator (08:30 IST scan)
+                               where we want catalyst names BEFORE market opens.
+    require_price_confirmation=False: skip the intraday-move gate (used pre-open
+                                      since LTP doesn't reflect tomorrow's open).
     """
-    if not is_market_hours():
+    if require_market_open and not is_market_hours():
         return []
-    ist = now_ist()
-    minutes_to_close = (15 * 60 + 30) - (ist.hour * 60 + ist.minute)
-    if minutes_to_close <= SKIP_LAST_MINUTES:
-        return []
+    if require_market_open:
+        ist = now_ist()
+        minutes_to_close = (15 * 60 + 30) - (ist.hour * 60 + ist.minute)
+        if minutes_to_close <= SKIP_LAST_MINUTES:
+            return []
     if risk_overlay_active:
         return []
 
@@ -142,13 +157,14 @@ def scan_for_catalysts(
         if len(sym_articles) >= MIN_ARTICLES:
             by_symbol[sym] = sym_articles
 
-    # Filter by source diversity + catalyst keyword presence
+    # Filter by source diversity + catalyst keyword presence + price confirmation
+    # Lazy-fetch intraday move only for shortlisted symbols to keep cost bounded
     decisions: list[CatalystDecision] = []
+    candidates = []
     for sym, arts in by_symbol.items():
         sources = {a.get("source") for a in arts if a.get("source")}
         if len(sources) < MIN_DISTINCT_SOURCES:
             continue
-        # Need at least one article with catalyst keyword
         catalyst_kind = None
         for a in arts:
             text = (a.get("title") or "") + " " + (a.get("excerpt") or "")
@@ -158,6 +174,44 @@ def scan_for_catalysts(
                 break
         if not catalyst_kind:
             continue
+        candidates.append((sym, arts, sources, catalyst_kind))
+
+    # Price confirmation: require today_total_pct >= MIN_INTRADAY_MOVE_PCT
+    # (the catalyst should already be moving the price; if not, skip — likely
+    # priced in or rumor). Skipped when called pre-open.
+    if candidates and require_price_confirmation:
+        try:
+            from data_fetcher import get_fetcher
+            from strategy.intraday_signals import compute_intraday_features
+            f = get_fetcher()
+            if not f.logged_in:
+                f.login()
+            confirmed = []
+            for sym, arts, sources, catalyst_kind in candidates:
+                try:
+                    ltp = float(f.get_ltp(sym).get("ltp", 0))
+                    if ltp <= 0:
+                        continue
+                    feat = compute_intraday_features(sym, ltp)
+                    if feat is None or feat.total_pct < MIN_INTRADAY_MOVE_PCT:
+                        logger.debug(f"catalyst {sym}: price not confirming "
+                                     f"(today {feat.total_pct if feat else 0:+.2f}% < "
+                                     f"{MIN_INTRADAY_MOVE_PCT}%) -- skip")
+                        continue
+                    confirmed.append((sym, arts, sources, catalyst_kind, feat))
+                except Exception as e:
+                    logger.debug(f"catalyst price check failed for {sym}: {e}")
+            candidates_filtered = confirmed
+        except Exception as e:
+            logger.warning(f"catalyst price-confirmation pass failed: {e}; falling back to news-only")
+            candidates_filtered = [(s, a, src, k, None) for s, a, src, k in candidates]
+    elif candidates:
+        # No price confirmation required (pre-open use): keep all news-passing candidates
+        candidates_filtered = [(s, a, src, k, None) for s, a, src, k in candidates]
+    else:
+        candidates_filtered = []
+
+    for sym, arts, sources, catalyst_kind, *_ in candidates_filtered:
         # Heuristic score = decayed article count, weighted by source diversity
         score = sum(0.5 ** (_article_age_hours(a, now_utc) / 3.0) for a in arts) * (len(sources) / 5.0)
         sample_titles = [(a.get("title") or "")[:120] for a in arts[:3]]
