@@ -25,7 +25,7 @@ const navigation = [
   { name: 'News Shadow', href: '/news-shadow', icon: Eye },
   { name: 'Mutual Funds', href: '/mutualfunds', icon: PieChart },
   { name: 'Market Analysis', href: '/market', icon: BarChart3 },
-  { name: 'Adaptive Engine', href: '/adaptive', icon: Brain },
+  { name: 'Strategy', href: '/adaptive', icon: Brain },
   { name: 'Track Record', href: '/performance', icon: Award },
   { name: 'Backtest', href: '/backtest', icon: FlaskConical },
 ]

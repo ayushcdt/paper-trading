@@ -67,9 +67,34 @@ export default async function AdaptivePage() {
       <div>
         <div className="flex items-center gap-2">
           <Brain className="w-6 h-6 text-indigo-600" />
-          <h1 className="text-2xl font-bold text-gray-900">Adaptive Engine — V3</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Strategy — Momentum Base + Risk Overlay</h1>
         </div>
-        <p className="text-gray-500 mt-1">Regime classifier + 4 strategy variants + live guardrails. Self-tunes within bounds.</p>
+        <p className="text-gray-500 mt-1">
+          momentum_agg variant + portfolio risk overlay (sector cap, DD circuit breaker, VIX gate, tail halt).
+          Replaced V3 adaptive on 2026-04-28 after backtest showed V3 had -3.78% alpha vs Nifty.
+          See <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">data/research/sustainability/</code> for the audit trail.
+        </p>
+      </div>
+
+      {/* Strategy change banner */}
+      <div className="card bg-amber-50 border-amber-200">
+        <div className="flex items-start gap-3">
+          <Activity className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+          <div className="text-sm text-amber-900">
+            <strong className="block mb-1">Strategy rewrite — 2026-04-28</strong>
+            <p>
+              V3 retired (live backtest: +3.50% CAGR, Sharpe 0.45, WR 31.9%, alpha -3.78% vs Nifty).
+              Replaced with momentum_agg + risk overlay (backtest: +21.69% CAGR, Sharpe 1.35, MaxDD -16%, alpha +14.36%).
+            </p>
+            <p className="mt-2">
+              <strong>Real money go-live BLOCKED</strong> until walk-forward validation passes.
+              Current verdict: FAIL (2/5 folds positive alpha, need 3). See <code className="bg-amber-100 px-1.5 py-0.5 rounded text-xs">data/research/walk_forward.json</code>.
+            </p>
+            <p className="mt-2 text-amber-700">
+              The historical V3 backtest stats below are RETIRED — kept for audit. Live system is now the new picker.
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Current regime / variant */}
