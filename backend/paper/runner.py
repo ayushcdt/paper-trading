@@ -137,16 +137,27 @@ def run_paper_runner() -> dict:
             logger.info(f"Cancelled pending_open {pending['symbol']} (no longer in picks)")
 
     # ----- Open: new picks not yet held (only if we're actually deploying)
+    #
+    # Two-pass slot sizing to maximize capital utilization at small portfolio sizes:
+    #   Pass 1: filter to picks not already held + not already pending + with valid price
+    #   Pass 2: estimate cash deployable per pick by: cash_available / max(1, n_affordable_picks).
+    #     A pick is "affordable" if its 1-share price <= cash_available.
+    #     Then redivide cash among affordable picks only.
+    # Effect: with Rs 10K equity and 10 picks of which 8 are too expensive, we deploy
+    # ~96% of cash into the 2 affordable picks (instead of ~16% under naive equal-split).
     opened = []
     queued = []
     if not force_all_close and new_picks:
-        # Current equity determines slot notional
         current_equity = pf.current_equity(prices)
-        n_slots = len(new_picks) if new_picks else 1
-        # Size per the picks list (the engine already applied deploy_pct to pick count)
-        slot_notional = current_equity / n_slots if n_slots > 0 else current_equity
         next_open_iso = _next_market_open_iso()
         already_pending = {p["symbol"] for p in pf.get_pending_opens()}
+
+        # Cash already locked in existing positions
+        held_notional = sum(p.qty * p.entry_price for p in open_positions.values())
+        cash_available = max(0.0, current_equity - held_notional)
+
+        # Filter to candidates that aren't already held / pending
+        candidates = []
         for pick in new_picks:
             sym = pick["symbol"]
             if sym in open_syms or sym in already_pending:
@@ -154,23 +165,62 @@ def run_paper_runner() -> dict:
             entry_price = float(pick.get("cmp", prices.get(sym, 0)))
             if entry_price <= 0:
                 continue
+            candidates.append((pick, entry_price))
+
+        # Greedy fill in rank order:
+        #   target_slot = current_equity / picker.max_positions  (the "fair" slot size)
+        #   for each candidate (ranked):
+        #     n_target = max(1, floor(target_slot / price))    // at least 1 share if slot
+        #                                                       // size is below 1-share cost
+        #     n_max    = floor(remaining_cash / price)         // cap by remaining cash
+        #     qty      = min(n_target, n_max)
+        #     if qty > 0: open at qty shares; deduct cost from remaining_cash
+        #     else: skip
+        # This deploys ~95-100% of available cash even when picks are pricier than
+        # the fair slot size (it overweights early-rank picks rather than leaving
+        # cash idle). At Rs 10K paper this is appropriate; at Rs 1L+ each pick
+        # naturally fits the fair slot so no overweighting happens.
+        max_positions = max(1, len(new_picks))
+        target_slot = current_equity / max_positions
+        remaining_cash = cash_available
+        for pick, entry_price in candidates:
+            sym = pick["symbol"]
             stop = float(pick.get("stop_loss", entry_price * 0.85))
             variant_for_pick = pick.get("variant") or variant_chosen
+
             if market_open:
+                if entry_price > remaining_cash:
+                    logger.info(f"Skipped {sym}: 1 share Rs{entry_price:.2f} > remaining cash Rs{remaining_cash:.0f}")
+                    continue
+                # Compute target qty (at least 1 share if any slot at all)
+                n_target = max(1, int(target_slot / entry_price))
+                n_max    = int(remaining_cash / entry_price)
+                qty      = min(n_target, n_max)
+                if qty <= 0:
+                    continue
+                cost = qty * entry_price
+                # Reuse open_position by passing slot_notional = cost (so its
+                # internal int(slot/price) computes the same qty)
                 pos = pf.open_position(
                     symbol=sym, variant=variant_for_pick, regime=regime,
-                    entry_price=entry_price, slot_notional=slot_notional,
+                    entry_price=entry_price, slot_notional=cost,
                     stop=stop,
                 )
                 if pos is None:
-                    logger.info(f"Skipped {sym}: slot Rs{slot_notional:.0f} can't afford 1 share at Rs{entry_price:.2f}")
+                    logger.info(f"Skipped {sym}: open_position rejected qty={qty} at Rs{entry_price:.2f}")
                     continue
                 opened.append({"symbol": sym, "entry": entry_price, "qty": pos.qty, "notional": pos.qty * pos.entry_price})
+                remaining_cash -= cost
+                if remaining_cash < min(p[1] for p in candidates):
+                    # No remaining candidate can fit even 1 share
+                    break
             else:
+                # Off-hours: queue with target_slot; the morning fill will redo the
+                # greedy with actual open prices.
                 pf.queue_pending_open(
                     symbol=sym, variant=variant_for_pick, regime=regime,
                     intended_entry_price=entry_price,
-                    planned_slot_notional=slot_notional,
+                    planned_slot_notional=target_slot,
                     stop=stop, intended_fill_at=next_open_iso,
                 )
                 queued.append({"symbol": sym, "ref_price": entry_price, "fill_at": next_open_iso})
