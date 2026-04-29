@@ -61,8 +61,13 @@ def _live_prices(symbols: list[str]) -> dict[str, float]:
 
 
 # ---------- Intraday rebalance config ----------
-INTRADAY_MIN_HOLD_DAYS = 1          # don't swap a position opened today
-INTRADAY_MAX_SWAPS_PER_DAY = 3      # cap churn (raised from 2 -- intraday signals can fire more)
+# min-hold-days dropped from 1 to 0 on 2026-04-29: real traders cut same-day
+# when signal proves wrong. Whipsaw risk now controlled by strength-gap
+# requirement (8+ composite points) and max-3-swaps-per-day cap. If we see
+# excessive churn/cost, raise back to 1 OR add asymmetric rule (allow close
+# only if position is in loss > X%).
+INTRADAY_MIN_HOLD_DAYS = 0
+INTRADAY_MAX_SWAPS_PER_DAY = 3      # cap churn (max 3 round-trips/day = ~2.4% friction worst case)
 INTRADAY_SKIP_LAST_MINUTES = 30     # don't swap in last 30min of session
 # Intraday-strength-based swap thresholds:
 INTRADAY_CANDIDATE_MIN_STRENGTH = 8.0    # candidate must be clearly strong (composite > +8)
