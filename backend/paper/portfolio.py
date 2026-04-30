@@ -226,8 +226,27 @@ class PaperPortfolio:
 
         target: explicit target price. If None, falls back to entry × 1.10
         (legacy behaviour). Picker now supplies ATR-based targets per variant
-        — see strategy/momentum_picker.py."""
+        — see strategy/momentum_picker.py.
+
+        SANITY GUARDS (P18 -- bug from 2026-04-30 VEDL stock split):
+        - reject if entry_price <= 0
+        - reject if stop is ABOVE entry (would instant-stop-out): this catches
+          corporate actions (splits/bonuses) where the picker JSON has
+          pre-action stop levels but live LTP is post-action. Today's
+          VEDL split caught us in a 30+ time infinite loop costing ~Rs 500
+          before this guard.
+        - reject if target is set and is BELOW entry (would instant-target-hit)
+        """
         if entry_price <= 0:
+            return None
+        if stop > 0 and stop >= entry_price:
+            from logzero import logger
+            logger.warning(f"REJECT open {symbol}: stop Rs{stop:.2f} >= entry Rs{entry_price:.2f} "
+                          f"(probable corporate action; pick data is stale)")
+            return None
+        if target is not None and target > 0 and target <= entry_price:
+            from logzero import logger
+            logger.warning(f"REJECT open {symbol}: target Rs{target:.2f} <= entry Rs{entry_price:.2f}")
             return None
         qty = int(slot_notional / entry_price)
         if qty <= 0:
