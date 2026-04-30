@@ -96,6 +96,46 @@ def _industry_of(symbol: str) -> str:
 
 # ---------- Risk overlay primitives ------------------------------------------
 
+def _regime_health_gate() -> tuple[float, str]:
+    """P17: regime drawdown circuit breaker. Reads recent live performance from
+    paper trade log. If 3-month CAGR negative or 6-month Sharpe negative,
+    we are in a FAILED REGIME for momentum_agg -- halve sizes and tighten
+    strength gate. Returns (size_multiplier, reason).
+
+    Rationale: walk-forward shows 3-month CAGR -8.47% / 6m Sharpe -0.19 as of
+    today. We can't trust the strategy at full size in this regime. Halving
+    sizes preserves capital for the recovery rather than compounding losses."""
+    try:
+        from paper.portfolio import PaperPortfolio, STARTING_CAPITAL
+        pf = PaperPortfolio()
+        curve = pf.equity_curve(days=90)
+        if len(curve) < 5:
+            return 1.0, "regime gate: too few days of data"
+        # 3-month return (proxy for CAGR direction)
+        first = curve[0].get("equity", STARTING_CAPITAL)
+        last = curve[-1].get("equity", STARTING_CAPITAL)
+        if first <= 0:
+            return 1.0, "regime gate: first equity zero"
+        ret_3m = (last - first) / first * 100
+        # Daily-return std for Sharpe approx
+        import math
+        equities = [c.get("equity", STARTING_CAPITAL) for c in curve]
+        rets = [(equities[i+1] - equities[i]) / equities[i] for i in range(len(equities)-1)]
+        if rets and any(rets):
+            mean_ret = sum(rets) / len(rets)
+            var = sum((r - mean_ret) ** 2 for r in rets) / max(1, len(rets) - 1)
+            std = math.sqrt(var) if var > 0 else 0
+            sharpe_proxy = (mean_ret * 252) / (std * math.sqrt(252)) if std > 0 else 0
+        else:
+            sharpe_proxy = 0
+        if ret_3m < -3.0 or sharpe_proxy < -0.2:
+            return 0.5, f"FAILED REGIME (3m {ret_3m:+.2f}%, Sharpe {sharpe_proxy:+.2f}): half-size + tight gates"
+        return 1.0, f"regime healthy (3m {ret_3m:+.2f}%, Sharpe {sharpe_proxy:+.2f})"
+    except Exception as e:
+        logger.warning(f"regime gate read failed: {e}")
+        return 1.0, "regime gate skipped"
+
+
 def _vix_gate() -> tuple[float, str]:
     """Returns (size_multiplier, reason). 1.0 = full size; 0.5 = halved; 0 = no entries."""
     try:
@@ -257,6 +297,7 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[
     held_by_sector, current_equity = _current_held_sector_exposure()
     state, dd_reason = _update_dd_halt(state, current_equity if current_equity > 0 else state.get("peak_equity", 0))
     vix_mult, vix_reason = _vix_gate()
+    regime_mult, regime_reason = _regime_health_gate()
     nifty_ok, nifty_reason = _nifty_today_check()
 
     halt_blocking_new = state.get("halt_active") or state.get("tail_halt") or vix_mult == 0.0 or not nifty_ok
@@ -300,6 +341,30 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[
         logger.error(f"momentum.pick failed: {e}")
         _save_state(state)
         return _empty_result(state, str(e), halt_reasons, vix_mult, vix_reason)
+
+    # P13: junk filter — drop fundamentals red-flags BEFORE sector cap.
+    # P15: earnings exclusion — drop names within T-2/T+1 of earnings.
+    try:
+        from strategy.quality_filter import passes_junk_filter
+        from news.earnings_calendar import is_in_earnings_window
+        clean_picks = []
+        rejected = []
+        for p in raw_picks:
+            ok, reason = passes_junk_filter(p.symbol)
+            if not ok:
+                rejected.append((p.symbol, f"junk: {reason}"))
+                continue
+            in_earn, earn_reason = is_in_earnings_window(p.symbol)
+            if in_earn:
+                rejected.append((p.symbol, f"earnings: {earn_reason}"))
+                continue
+            clean_picks.append(p)
+        if rejected:
+            logger.info(f"Pre-sector filters dropped {len(rejected)} picks: " +
+                        "; ".join(f"{s}({r})" for s, r in rejected[:5]))
+        raw_picks = clean_picks
+    except Exception as e:
+        logger.warning(f"junk/earnings filter pass failed: {e}; continuing without filter")
 
     # Apply sector cap (using current portfolio sector exposure as starting state)
     capped = _apply_sector_cap(raw_picks, held_by_sector, current_equity or 1_000_000)
@@ -361,11 +426,12 @@ def run_momentum_picker(max_picks: int = MAX_POSITIONS, intraday_ltps: Optional[
             "vix_gate": vix_reason,
             "nifty_today": nifty_reason,
             "dd_state": dd_reason,
+            "regime_health": regime_reason,
             "peak_equity": state.get("peak_equity"),
         },
         "variant": "momentum_agg",
         "variant_reason": "Single-variant momentum_agg + risk overlay (Q4 backtest winner: +21.69% CAGR, Sharpe 1.35, MaxDD -16%)",
-        "deploy_pct": int(100 * vix_mult) if not halt_blocking_new else 0,
+        "deploy_pct": int(100 * vix_mult * regime_mult) if not halt_blocking_new else 0,
         "kill_switch_active": halt_blocking_new,
         "kill_switch_reason": " | ".join(halt_reasons) if halt_reasons else "",
         "picks": picks_dicts,

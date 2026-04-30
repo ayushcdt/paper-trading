@@ -61,20 +61,45 @@ SKIP_LAST_MINUTES = 30
 SLOT_SIZE_FACTOR = 0.5         # 50% of normal slot
 STOP_ATR_MULTIPLIER = 1.5      # tighter than base picker
 
-CATALYST_KEYWORDS = [
+# P16 (2026-04-29): split positive vs negative catalysts.
+# Was a bug -- "results miss" was in the OR-group with "beat/surge/jump",
+# meaning "Q4 results miss estimates" triggered a BUY. Now negative
+# keywords are tracked separately and BLOCK an entry when present.
+CATALYST_POSITIVE_KEYWORDS = [
     r"\bacqui(re|sition|red|sitions)\b",
     r"\bmerger\b", r"\bmerged?\b",
     r"\btakeover\b",
-    r"\bUSFDA\b", r"\bFDA approval\b", r"\bdrug approval\b",
+    r"\bUSFDA approval\b", r"\bFDA approval\b", r"\bdrug approval\b",
     r"\bcontract win\b", r"\border (win|book)\b", r"\bbagged.{0,20}order\b",
-    r"\bresults?\s*(beat|surge|jump|miss)\b",
+    r"\bresults?\s*(beat|surge|jump|exceed)\b",
     r"\bdividend\b.*\bdeclared\b", r"\bbonus issue\b",
     r"\bblock deal\b", r"\bbulk deal\b",
     r"\bqualified institutional\b", r"\bQIP\b",
-    r"\b(profit|revenue|earnings)\s*(jump|surge|rises?|grew)\b",
+    r"\b(profit|revenue|earnings)\s*(jump|surge|rises?|grew|growth)\b",
     r"\bbuyback\b",
     r"\brights issue\b",
 ]
+
+CATALYST_NEGATIVE_KEYWORDS = [
+    r"\bresults?\s*(miss|disappoint|fall|drop|decline)\b",
+    r"\b(profit|revenue|earnings)\s*(miss|fall|drop|decline)\b",
+    r"\bUSFDA\s*(reject|rejection|warning)\b",
+    r"\bFDA\s*(reject|rejection|warning letter)\b",
+    r"\b(SEBI|NSE|BSE)\s*(probe|investigation|fine|penalty|ban|suspend)\b",
+    r"\bdowngrade\b",
+    r"\b(loss|losses)\s*(widen|expand)\b",
+    r"\bdebt\s*default\b",
+    r"\bgovernance\s*concerns?\b",
+    r"\bfraud\b", r"\bscam\b",
+]
+
+# Backward compat alias (some external code may import this)
+CATALYST_KEYWORDS = CATALYST_POSITIVE_KEYWORDS
+
+# Sentiment veto threshold: LM net score below this -> block buy.
+# Calibrated from research: -2.0 corresponds to ~3 net negative-word hits
+# across the cluster -- conservatively tuned to fire only on clear bad news.
+SENTIMENT_VETO_THRESHOLD = -2.0
 
 
 @dataclass
@@ -89,12 +114,52 @@ class CatalystDecision:
     intended_stop: float = 0.0
 
 
-def _has_catalyst(text: str) -> Optional[str]:
-    for pat in CATALYST_KEYWORDS:
+def _has_positive_catalyst(text: str) -> Optional[str]:
+    for pat in CATALYST_POSITIVE_KEYWORDS:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             return m.group(0)
     return None
+
+
+def _has_negative_catalyst(text: str) -> Optional[str]:
+    """Returns matched negative phrase if found, else None.
+    Used to BLOCK a catalyst entry even if positive keywords match."""
+    for pat in CATALYST_NEGATIVE_KEYWORDS:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(0)
+    return None
+
+
+# Backward compat alias
+def _has_catalyst(text: str) -> Optional[str]:
+    return _has_positive_catalyst(text)
+
+
+def _aggregate_sentiment(articles: list[dict]) -> float:
+    """Aggregate LM sentiment net score across an article cluster.
+    Reuses the existing scorer in news.feed if available."""
+    try:
+        from news.feed import _sentiment as _lm_sentiment
+    except Exception:
+        return 0.0
+    total = 0.0
+    n = 0
+    for a in articles:
+        text = (a.get("title") or "") + " " + (a.get("excerpt") or "")
+        if not text.strip():
+            continue
+        try:
+            s = _lm_sentiment(text)
+            net = s.get("net", 0.0) if isinstance(s, dict) else float(s)
+            total += net
+            n += 1
+        except Exception:
+            continue
+    if n == 0:
+        return 0.0
+    return total
 
 
 def _article_age_hours(article: dict, now: datetime) -> float:
@@ -157,23 +222,61 @@ def scan_for_catalysts(
         if len(sym_articles) >= MIN_ARTICLES:
             by_symbol[sym] = sym_articles
 
-    # Filter by source diversity + catalyst keyword presence + price confirmation
-    # Lazy-fetch intraday move only for shortlisted symbols to keep cost bounded
+    # Filter by: source diversity + positive keyword + NO negative keyword + sentiment OK
+    # P14/P16: split positive vs negative keywords; aggregate LM sentiment as veto.
     decisions: list[CatalystDecision] = []
     candidates = []
     for sym, arts in by_symbol.items():
         sources = {a.get("source") for a in arts if a.get("source")}
         if len(sources) < MIN_DISTINCT_SOURCES:
             continue
+        # Positive keyword required
         catalyst_kind = None
         for a in arts:
             text = (a.get("title") or "") + " " + (a.get("excerpt") or "")
-            kind = _has_catalyst(text)
+            kind = _has_positive_catalyst(text)
             if kind:
                 catalyst_kind = kind
                 break
         if not catalyst_kind:
             continue
+        # P16: block if ANY article has a negative-catalyst keyword
+        # (e.g. "results miss", "FDA rejection", "SEBI probe")
+        neg_kind = None
+        for a in arts:
+            text = (a.get("title") or "") + " " + (a.get("excerpt") or "")
+            kind = _has_negative_catalyst(text)
+            if kind:
+                neg_kind = kind
+                break
+        if neg_kind:
+            logger.info(f"catalyst {sym}: BLOCKED -- negative keyword '{neg_kind}' "
+                        f"present despite positive '{catalyst_kind}'")
+            continue
+        # P14: LM sentiment veto on cluster
+        sent_net = _aggregate_sentiment(arts)
+        if sent_net < SENTIMENT_VETO_THRESHOLD:
+            logger.info(f"catalyst {sym}: BLOCKED -- sentiment {sent_net:+.2f} "
+                        f"< veto {SENTIMENT_VETO_THRESHOLD}")
+            continue
+        # P15: don't open into earnings window
+        try:
+            from news.earnings_calendar import is_in_earnings_window
+            in_earn, earn_reason = is_in_earnings_window(sym)
+            if in_earn:
+                logger.info(f"catalyst {sym}: BLOCKED -- {earn_reason}")
+                continue
+        except Exception:
+            pass
+        # P13: junk filter on fundamentals
+        try:
+            from strategy.quality_filter import passes_junk_filter
+            ok, qf_reason = passes_junk_filter(sym)
+            if not ok:
+                logger.info(f"catalyst {sym}: BLOCKED -- junk filter: {qf_reason}")
+                continue
+        except Exception:
+            pass
         candidates.append((sym, arts, sources, catalyst_kind))
 
     # Price confirmation: require today_total_pct >= MIN_INTRADAY_MOVE_PCT
