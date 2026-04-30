@@ -259,16 +259,24 @@ def intraday_rebalance(pf: PaperPortfolio, picker_out: dict, latest_prices: dict
             import traceback
             logger.warning(f"intraday strength swap failed: {e}\n{traceback.format_exc()[:300]}")
 
-    if not out["closed"]:
-        # No drops -> nothing to do; openings only happen if we freed up cash
-        return out
-
-    # Re-read state after closes
+    # Always check for idle cash to deploy -- includes cash freed by per-tick
+    # stops/targets in paper_marker (which DON'T go through this loop). Was
+    # an architectural gap: ITC stopped out at 09:25 via per-tick check,
+    # cash sat idle until manual intervention. Fix: every loop iteration,
+    # check if cash > min position size AND fewer positions than max,
+    # AND there are picks not yet held -- if so, deploy.
     open_positions = pf.get_open_positions()
     held_syms = set(open_positions.keys())
     held_notional = sum(p.qty * p.entry_price for p in open_positions.values())
     current_equity = pf.current_equity(latest_prices)
     cash_available = max(0.0, current_equity - held_notional)
+
+    # Only deploy if (a) we have meaningful cash AND (b) there are unheld picks
+    new_pick_syms = {p["symbol"] for p in new_picks}
+    unheld_picks = new_pick_syms - held_syms
+    MIN_DEPLOY_CASH = 200.0  # below this, not worth the friction
+    if not out["closed"] and (cash_available < MIN_DEPLOY_CASH or not unheld_picks):
+        return out
 
     # Open candidates: picks not yet held (greedy fill same as main loop).
     # CRITICAL: pick["cmp"] is the entry_ref captured when the picker JSON was
