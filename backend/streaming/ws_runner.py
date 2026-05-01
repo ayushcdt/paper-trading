@@ -249,19 +249,61 @@ def subscription_refresher():
 
 
 REALTIME_REBALANCE_INTERVAL_SEC = 30
+PICKER_RERUN_EVERY_N_CYCLES = 10  # 10 * 30s = 5 min picker refresh with live LTPs
+
+
+def _rerun_picker_with_live_ltps(ltps: dict) -> bool:
+    """P19: real-time picker refresh. Re-runs run_momentum_picker with current
+    LTPs as intraday_ltps so today's price moves are baked into 12-1m / 6m / 3m
+    momentum scores. Persists fresh picks_extended back to stocks.json so the
+    intraday_rebalance loop and per-tick trailing logic operate on a CURRENT
+    universe rank, not yesterday's postclose snapshot. Preserves any manual
+    flags (kill_switch_active, kill_switch_reason) from the file."""
+    try:
+        from strategy.momentum_picker import run_momentum_picker
+        import json as _json
+        from pathlib import Path as _P
+        picks_path = _P(__file__).resolve().parent.parent.parent / "data" / "stocks.json"
+        existing = {}
+        if picks_path.exists():
+            try:
+                existing = _json.loads(picks_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        # Preserve manual overrides (kill switch + reason)
+        manual_kill = existing.get("kill_switch_active")
+        manual_reason = existing.get("kill_switch_reason")
+        out = run_momentum_picker(max_picks=10, intraday_ltps=ltps)
+        existing.update(out)
+        # Re-apply manual kill switch if it was set externally
+        if manual_kill is True and manual_reason and "manual" in str(manual_reason).lower():
+            existing["kill_switch_active"] = True
+            existing["kill_switch_reason"] = manual_reason
+        existing["last_intraday_picker_run"] = datetime.now().isoformat()
+        picks_path.write_text(_json.dumps(existing, indent=2, default=str), encoding="utf-8")
+        n_picks = len(out.get("picks", []))
+        n_ext = len(out.get("picks_extended", []))
+        logger.info(f"REALTIME picker re-ran with {len(ltps)} live LTPs: "
+                    f"{n_picks} picks + {n_ext} extended")
+        return True
+    except Exception as e:
+        logger.warning(f"realtime picker rerun failed: {e}")
+        return False
 
 
 def realtime_rebalance_loop():
     """Replaces the 15-min mark_to_market scheduled task for intraday rebalance.
-    Runs every 30s during market hours: pending fills + position mgmt
-    (15-min logic complemented by per-tick trailing in paper_marker) +
-    intraday strength scan + catalyst injection. Skips heavy daily-bar
-    picker re-runs -- those are still postclose only via generate_analysis.
+    Runs every 30s during market hours:
+      - position management (time-exit, trail-as-fallback)
+      - intraday strength scan + catalyst injection
+      - every N cycles (5 min): full picker re-run with live LTPs (P19)
     """
+    cycle = 0
     while True:
         time.sleep(REALTIME_REBALANCE_INTERVAL_SEC)
         if not is_market_hours():
             continue
+        cycle += 1
         try:
             # Lazy imports inside loop to avoid import order weirdness at startup
             from paper.portfolio import PaperPortfolio
@@ -270,17 +312,21 @@ def realtime_rebalance_loop():
             import json as _json
             from pathlib import Path as _P
             pf = PaperPortfolio()
-            held = pf.get_open_symbols()
-            if not held:
-                continue
             # Reuse marker's price cache as primary LTP source (no extra fetches)
             from streaming.paper_marker import get_marker as _gm
             ltps = dict(_gm()._prices)
+            # P19: every 5 min, re-run the daily-bar momentum picker with live
+            # intraday LTPs so picks reflect today's regime, not yesterday's close.
+            if cycle % PICKER_RERUN_EVERY_N_CYCLES == 0:
+                _rerun_picker_with_live_ltps(ltps)
+            held = pf.get_open_symbols()
+            if not held:
+                continue
             # Position mgmt (stops/targets are now per-tick in paper_marker;
             # this still handles time-exit + trailing for held names whose
             # ATR proxy doesn't have a target_price).
             manage_positions(pf, ltps)
-            # Intraday rebalance using current picker JSON
+            # Intraday rebalance using current (now-fresh-every-5min) picker JSON
             picks_path = _P(__file__).resolve().parent.parent.parent / "data" / "stocks.json"
             if picks_path.exists():
                 try:
@@ -300,6 +346,14 @@ def main_loop():
     watchdog.start()
     rebalancer = threading.Thread(target=realtime_rebalance_loop, daemon=True)
     rebalancer.start()
+    # P20: F&O auto-trader (60s reversal-detection loop)
+    try:
+        from fno.fno_autotrader import autotrader_loop
+        fno_thread = threading.Thread(target=autotrader_loop, daemon=True)
+        fno_thread.start()
+        logger.info("F&O autotrader thread started")
+    except Exception as e:
+        logger.warning(f"F&O autotrader failed to start: {e}")
 
     while True:
         if not is_market_hours():

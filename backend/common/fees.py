@@ -35,6 +35,21 @@ STAMP_INTRADAY_BUY_PCT = 0.003 / 100       # 0.003% on buy only (intraday)
 
 GST_PCT = 18 / 100                         # 18% on (brokerage + exchange + SEBI)
 
+# ---- F&O OPTIONS rates (Zerodha) ----
+# Options have very different fee structure than equity
+FNO_BROKERAGE_PER_ORDER = 20.0             # Rs 20 flat per executed order (buy or sell)
+FNO_STT_SELL_PCT = 0.0625 / 100            # 0.0625% on sell side PREMIUM (not notional)
+FNO_EXCHANGE_PCT = 0.0353 / 100            # 0.0353% on PREMIUM both legs
+FNO_SEBI_PCT = 0.0001 / 100                # 0.0001% on PREMIUM both legs
+FNO_STAMP_BUY_PCT = 0.003 / 100            # 0.003% on buy PREMIUM
+# GST = 18% on (brokerage + exchange + SEBI)
+
+# ---- Slippage model ----
+# Empirical slippage estimates for retail Zerodha-style execution
+EQUITY_SLIPPAGE_PCT = 0.05 / 100           # 0.05% per leg (low for liquid Nifty 50 names)
+FNO_INDEX_SLIPPAGE_PCT = 0.5 / 100         # 0.5% per leg (NIFTY/BANKNIFTY weekly options)
+FNO_STOCK_SLIPPAGE_PCT = 1.5 / 100         # 1.5% per leg (illiquid stock options)
+
 
 @dataclass
 class FeeBreakdown:
@@ -108,6 +123,77 @@ def compute_round_trip_fees_pct(buy_price: float, sell_price: float, qty: int,
     fb = compute_round_trip_fees(buy_price, sell_price, qty, is_intraday)
     bn = buy_price * qty
     return (fb.total / bn) * 100 if bn > 0 else 0.0
+
+
+def compute_fno_round_trip_fees(buy_premium: float, sell_premium: float, qty: int,
+                                 is_index: bool = True) -> FeeBreakdown:
+    """F&O option round-trip fees (Zerodha-style).
+    qty = lot_size (e.g. 65 for NIFTY weekly). buy/sell_premium are per-share.
+    is_index=True for NIFTY/BANKNIFTY, False for stock options."""
+    if qty <= 0 or buy_premium <= 0 or sell_premium <= 0:
+        return FeeBreakdown(0, 0, 0, 0, 0, 0, 0, True)
+
+    buy_notional = buy_premium * qty
+    sell_notional = sell_premium * qty
+    total_notional = buy_notional + sell_notional
+
+    brokerage = FNO_BROKERAGE_PER_ORDER * 2     # buy + sell
+    stt = sell_notional * FNO_STT_SELL_PCT      # sell side only
+    exchange = total_notional * FNO_EXCHANGE_PCT
+    sebi = total_notional * FNO_SEBI_PCT
+    stamp = buy_notional * FNO_STAMP_BUY_PCT
+    gst = (brokerage + exchange + sebi) * GST_PCT
+    total = brokerage + stt + exchange + sebi + stamp + gst
+    return FeeBreakdown(brokerage, stt, exchange, sebi, stamp, gst, total, True)
+
+
+def apply_slippage(intended_price: float, side: str, instrument: str = "equity") -> float:
+    """Apply realistic slippage to intended fill price.
+    side: 'buy' (raises price) or 'sell' (lowers price)
+    instrument: 'equity' / 'fno_index' / 'fno_stock'"""
+    if intended_price <= 0:
+        return intended_price
+    if instrument == "fno_index":
+        slip = FNO_INDEX_SLIPPAGE_PCT
+    elif instrument == "fno_stock":
+        slip = FNO_STOCK_SLIPPAGE_PCT
+    else:
+        slip = EQUITY_SLIPPAGE_PCT
+    if side == "buy":
+        return intended_price * (1 + slip)
+    else:
+        return intended_price * (1 - slip)
+
+
+def real_money_pnl(buy_price: float, sell_price: float, qty: int,
+                    instrument: str = "equity", is_intraday: bool = False) -> dict:
+    """Compute realistic real-money P&L with slippage + accurate fees applied.
+    Returns paper, real, and the slippage+fee gap."""
+    paper_pnl = (sell_price - buy_price) * qty
+
+    # Apply slippage
+    real_buy = apply_slippage(buy_price, "buy", instrument)
+    real_sell = apply_slippage(sell_price, "sell", instrument)
+    real_gross = (real_sell - real_buy) * qty
+
+    # Compute real fees
+    if instrument == "fno_index":
+        fb = compute_fno_round_trip_fees(real_buy, real_sell, qty, is_index=True)
+    elif instrument == "fno_stock":
+        fb = compute_fno_round_trip_fees(real_buy, real_sell, qty, is_index=False)
+    else:
+        fb = compute_round_trip_fees(real_buy, real_sell, qty, is_intraday)
+
+    real_net = real_gross - fb.total
+    return {
+        "paper_pnl": round(paper_pnl, 2),
+        "real_pnl": round(real_net, 2),
+        "slippage_loss": round(paper_pnl - real_gross, 2),
+        "fees_paid": round(fb.total, 2),
+        "fee_breakdown": fb.as_dict(),
+        "real_buy_price": round(real_buy, 2),
+        "real_sell_price": round(real_sell, 2),
+    }
 
 
 if __name__ == "__main__":
