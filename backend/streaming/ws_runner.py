@@ -346,14 +346,23 @@ def main_loop():
     watchdog.start()
     rebalancer = threading.Thread(target=realtime_rebalance_loop, daemon=True)
     rebalancer.start()
-    # P20: F&O auto-trader (60s reversal-detection loop)
+    # P20/P24: F&O auto-traders (one per index, parallel)
     try:
         from fno.fno_autotrader import autotrader_loop
-        fno_thread = threading.Thread(target=autotrader_loop, daemon=True)
-        fno_thread.start()
-        logger.info("F&O autotrader thread started")
+        for underlying in ("NIFTY", "BANKNIFTY"):
+            t = threading.Thread(target=autotrader_loop, args=(underlying,), daemon=True)
+            t.start()
+            logger.info(f"F&O autotrader thread started for {underlying}")
     except Exception as e:
         logger.warning(f"F&O autotrader failed to start: {e}")
+    # P27: catalyst-driven stock options trader
+    try:
+        from fno.catalyst_options import catalyst_options_loop
+        c_thread = threading.Thread(target=catalyst_options_loop, daemon=True)
+        c_thread.start()
+        logger.info("Catalyst options trader thread started")
+    except Exception as e:
+        logger.warning(f"Catalyst options failed to start: {e}")
 
     while True:
         if not is_market_hours():

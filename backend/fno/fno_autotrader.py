@@ -49,8 +49,8 @@ from logzero import logger
 
 # ---------- Activation gates ----------
 ENABLE_AUTOTRADER = True       # MASTER switch
-SIGNAL_INTERVAL_SEC = 60       # check every 60s
-MAX_TRADES_PER_DAY = 4         # prevent runaway after good signals
+SIGNAL_INTERVAL_SEC = 30       # check every 30s (P25: was 60s)
+MAX_TRADES_PER_DAY = 8         # P25: was 4. Allows 1-2 trades per hour during active session
 
 # ---------- Signal thresholds ----------
 NIFTY_MOVE_THRESHOLD_PCT = 0.5     # min intraday move to consider a reversal
@@ -58,7 +58,24 @@ NEAR_EXTREME_PCT = 0.3             # how close to the day's high/low to trigger
 RECOVERY_WINDOW_MIN = 5            # last N min to confirm recovery
 RECOVERY_MIN_MOVE_PCT = 0.05       # min recovery/rolloff move in window (tuned 0.10 -> 0.05 for sensitivity)
 
-# ---------- Position params ----------
+# ---------- Per-index config ----------
+# Add new index by adding entry here. Strike-step is the option chain spacing
+# (NIFTY = 50, BANKNIFTY = 100). OTM_OFFSET adds N points beyond spot for
+# OTM selection.
+INDEX_CONFIG = {
+    "NIFTY": {
+        "underlying_token": "99926000",
+        "otm_offset_points": 100,
+        "strike_step": 50,
+    },
+    "BANKNIFTY": {
+        "underlying_token": "99926009",
+        "otm_offset_points": 200,    # BANKNIFTY moves more, wider OTM
+        "strike_step": 100,
+    },
+}
+
+# Legacy NIFTY-only config kept for backward compat
 OTM_OFFSET_POINTS = 100            # NIFTY OTM strike offset (e.g. spot 24000 -> 24100 CE / 23900 PE)
 MIN_DAYS_TO_EXPIRY = 3             # avoid expiry-day theta crush
 MAX_DAYS_TO_EXPIRY = 7             # don't pay for too much time decay
@@ -167,8 +184,17 @@ def _detect_signal(history: NiftyHistory, prev_close: float) -> Optional[str]:
     return None
 
 
-def _open_option(direction: str, spot: float, equity: float) -> Optional[dict]:
-    """Open the option position. Returns dict on success, None on failure."""
+# P26 multi-strike ladder: when signal fires AND equity allows, open BOTH
+# OTM (high gamma, cheap leverage) AND ATM (high delta) of same direction.
+# Two-bet exposure captures both small + large moves of underlying.
+ENABLE_MULTI_STRIKE = True
+MULTI_STRIKE_MIN_EQUITY = 25_000   # only ladder when capital permits both legs
+
+
+def _open_option(direction: str, spot: float, equity: float,
+                 underlying: str = "NIFTY") -> Optional[dict]:
+    """Open the option position. underlying = 'NIFTY' or 'BANKNIFTY'.
+    Returns dict on success, None on failure."""
     try:
         from fno.nfo_master import list_expiries
         from fno.option_chain import find_contract, get_option_ltp, days_to_expiry
@@ -177,8 +203,12 @@ def _open_option(direction: str, spot: float, equity: float) -> Optional[dict]:
         logger.warning(f"fno imports failed: {e}")
         return None
 
+    cfg = INDEX_CONFIG.get(underlying.upper(), INDEX_CONFIG["NIFTY"])
+    otm_offset = cfg["otm_offset_points"]
+    strike_step = cfg["strike_step"]
+
     # Pick expiry in window
-    expiries = list_expiries("NIFTY", "OPTIDX")
+    expiries = list_expiries(underlying, "OPTIDX")
     target_expiry = None
     for exp in expiries:
         d = days_to_expiry(exp)
@@ -186,27 +216,25 @@ def _open_option(direction: str, spot: float, equity: float) -> Optional[dict]:
             target_expiry = exp
             break
     if not target_expiry:
-        logger.info(f"autotrader: no expiry in {MIN_DAYS_TO_EXPIRY}-{MAX_DAYS_TO_EXPIRY}d window")
+        logger.info(f"autotrader[{underlying}]: no expiry in {MIN_DAYS_TO_EXPIRY}-{MAX_DAYS_TO_EXPIRY}d window")
         return None
 
-    # Pick strike
+    # Pick strike (round to strike step)
     if direction == "BULLISH":
-        # OTM CALL above spot
-        strike = int((spot + OTM_OFFSET_POINTS) / 50) * 50
+        strike = int((spot + otm_offset) / strike_step) * strike_step
         opt_type = "CE"
     else:
-        # OTM PUT below spot
-        strike = int((spot - OTM_OFFSET_POINTS) / 50) * 50
+        strike = int((spot - otm_offset) / strike_step) * strike_step
         opt_type = "PE"
 
-    contract = find_contract("NIFTY", target_expiry, strike, opt_type, "OPTIDX")
+    contract = find_contract(underlying, target_expiry, strike, opt_type, "OPTIDX")
     if not contract:
-        logger.warning(f"autotrader: contract not found for {strike}{opt_type} {target_expiry}")
+        logger.warning(f"autotrader[{underlying}]: contract not found for {strike}{opt_type} {target_expiry}")
         return None
 
     premium = get_option_ltp(contract)
     if not premium or premium <= 0:
-        logger.warning(f"autotrader: premium fetch failed for {contract.get('symbol')}")
+        logger.warning(f"autotrader[{underlying}]: premium fetch failed for {contract.get('symbol')}")
         return None
 
     lot_size = int(contract.get("lotsize", 0))
@@ -244,13 +272,61 @@ def _open_option(direction: str, spot: float, equity: float) -> Optional[dict]:
     return {"symbol": sym, "direction": direction, "premium": premium, "cost": cost}
 
 
-def autotrader_loop():
-    """Main loop. Run from ws_runner or standalone."""
+def _open_option_atm(direction: str, spot: float, equity: float,
+                      underlying: str = "NIFTY") -> Optional[dict]:
+    """ATM-strike variant for ladder mode. Higher delta, more responsive
+    to small underlying moves. More expensive than OTM."""
+    try:
+        from fno.nfo_master import list_expiries
+        from fno.option_chain import find_atm_strike, find_contract, get_option_ltp, days_to_expiry
+        from paper.portfolio import PaperPortfolio
+    except Exception:
+        return None
+
+    cfg = INDEX_CONFIG.get(underlying.upper(), INDEX_CONFIG["NIFTY"])
+    expiries = list_expiries(underlying, "OPTIDX")
+    target_expiry = next((e for e in expiries if MIN_DAYS_TO_EXPIRY <= days_to_expiry(e) <= MAX_DAYS_TO_EXPIRY), None)
+    if not target_expiry:
+        return None
+
+    atm_strike = find_atm_strike(underlying, spot, target_expiry, "OPTIDX")
+    if not atm_strike:
+        return None
+    opt_type = "CE" if direction == "BULLISH" else "PE"
+    contract = find_contract(underlying, target_expiry, atm_strike, opt_type, "OPTIDX")
+    if not contract:
+        return None
+    premium = get_option_ltp(contract)
+    if not premium or premium <= 0:
+        return None
+    lot_size = int(contract.get("lotsize", 0))
+    cost = premium * lot_size
+    if cost > equity * LOT_COST_MAX_PCT:
+        return None
+
+    pf = PaperPortfolio()
+    variant = "fno_call" if opt_type == "CE" else "fno_put"
+    pos = pf.open_position(
+        symbol=contract.get("symbol"), variant=variant,
+        regime=f"{direction}_LADDER_ATM",
+        entry_price=premium, slot_notional=cost,
+        stop=premium * STOP_PREMIUM_PCT, target=premium * TARGET_PREMIUM_PCT,
+        reason=f"AUTOTRADER LADDER ATM {direction}: {underlying} spot {spot:.0f}, {atm_strike}{opt_type}",
+    )
+    if pos:
+        logger.info(f"AUTOTRADER LADDER ATM {contract.get('symbol')} qty={pos.qty} @ Rs{premium:.2f}")
+        return {"symbol": contract.get("symbol"), "premium": premium, "cost": cost}
+    return None
+
+
+def autotrader_loop(underlying: str = "NIFTY"):
+    """Main loop for one underlying. Run from ws_runner per index.
+    underlying: 'NIFTY' or 'BANKNIFTY'."""
     from common.market_hours import is_market_hours
     from data_fetcher import get_fetcher
     from paper.portfolio import PaperPortfolio
 
-    logger.info("F&O autotrader starting")
+    logger.info(f"F&O autotrader starting for {underlying}")
     history = NiftyHistory()
     prev_close = None
 
@@ -265,7 +341,7 @@ def autotrader_loop():
             f = get_fetcher()
             if not f.logged_in:
                 f.login()
-            data = f.get_ltp("NIFTY")
+            data = f.get_ltp(underlying)
             spot = float(data.get("ltp", 0))
             if spot <= 0:
                 continue
@@ -298,30 +374,62 @@ def autotrader_loop():
             if not signal:
                 continue
 
-            # P23: multi-leg support. Up to MAX_OPEN_FNO_LEGS simultaneous F&O
-            # positions, but block opening a duplicate direction (don't add a
-            # 2nd CALL on top of existing CALL -- that's just doubling down).
-            # Different direction (CALL + PUT = strangle) is allowed.
-            MAX_OPEN_FNO_LEGS = 2
+            # P23/P25: multi-leg support with capital-scaled cap.
+            # Cap scales: 2 at <Rs 25K, 4 at Rs 25K-1L, 6 at Rs 1L+
             pf = PaperPortfolio()
+            held_ltps = {s: float(f.get_ltp(s).get("ltp", 0)) for s in pf.get_open_symbols()}
+            equity = pf.current_equity(held_ltps)
+            if equity >= 100_000:
+                MAX_OPEN_FNO_LEGS = 6
+            elif equity >= 25_000:
+                MAX_OPEN_FNO_LEGS = 4
+            else:
+                MAX_OPEN_FNO_LEGS = 2
+
+            # Total cap across all F&O
             held_calls = sum(1 for p in pf.get_open_positions().values() if p.variant == "fno_call")
             held_puts = sum(1 for p in pf.get_open_positions().values() if p.variant == "fno_put")
             if (held_calls + held_puts) >= MAX_OPEN_FNO_LEGS:
                 continue
-            if signal == "BULLISH" and held_calls > 0:
+            # Per-underlying duplicate-direction guard. Blocks 2nd NIFTY CALL
+            # but allows 1 NIFTY CALL + 1 BANKNIFTY CALL (different underlyings).
+            held_calls_this_und = sum(
+                1 for sym, p in pf.get_open_positions().items()
+                if p.variant == "fno_call" and sym.upper().startswith(underlying.upper())
+            )
+            held_puts_this_und = sum(
+                1 for sym, p in pf.get_open_positions().items()
+                if p.variant == "fno_put" and sym.upper().startswith(underlying.upper())
+            )
+            if signal == "BULLISH" and held_calls_this_und > 0:
                 continue
-            if signal == "BEARISH" and held_puts > 0:
+            if signal == "BEARISH" and held_puts_this_und > 0:
                 continue
 
-            # Compute equity (cash + held)
-            held_ltps = {s: float(f.get_ltp(s).get("ltp", 0)) for s in pf.get_open_symbols()}
-            equity = pf.current_equity(held_ltps)
-
-            # Open
-            result = _open_option(signal, spot, equity)
-            if result:
-                state["trades_today"] = state.get("trades_today", 0) + 1
+            # P26 ladder: at sufficient capital, open BOTH OTM + ATM legs
+            # for higher upside capture if signal is correct
+            opens_done = 0
+            if ENABLE_MULTI_STRIKE and equity >= MULTI_STRIKE_MIN_EQUITY and (held_calls + held_puts) <= MAX_OPEN_FNO_LEGS - 2:
+                # OTM leg first (matches the original)
+                otm_res = _open_option(signal, spot, equity * 0.5, underlying=underlying)
+                if otm_res:
+                    opens_done += 1
+                    state["trades_today"] = state.get("trades_today", 0) + 1
+                    # Now try ATM leg with remaining cash
+                    atm_res = _open_option_atm(signal, spot, equity * 0.5, underlying=underlying)
+                    if atm_res:
+                        opens_done += 1
+                        state["trades_today"] = state.get("trades_today", 0) + 1
                 _save_state(state)
+            else:
+                # Single leg (original behavior at small capital)
+                result = _open_option(signal, spot, equity, underlying=underlying)
+                if result:
+                    state["trades_today"] = state.get("trades_today", 0) + 1
+                    _save_state(state)
+                    opens_done += 1
+            if opens_done > 0:
+                logger.info(f"autotrader[{underlying}]: opened {opens_done} legs for {signal} signal")
 
         except Exception as e:
             import traceback
