@@ -261,10 +261,21 @@ def execute_trade(direction: str, conviction: int, reasons: list[str], state: di
     return False
 
 
-def alert_only(direction: str, conviction: int, reasons: list[str]):
-    """Telegram alert for 3-4/5 setups; user decides."""
+def alert_only(direction: str, conviction: int, reasons: list[str], market_state: dict | None = None):
+    """Telegram alert for 3-4/5 setups; user decides. Adds Gemini second opinion."""
+    gemini_block = ""
+    if market_state is not None and conviction >= 4:
+        try:
+            from ai.gemini import second_opinion_setup
+            agree, gem_resp = second_opinion_setup(direction, reasons, market_state)
+            tag = "AGREES" if agree else "DISAGREES"
+            gemini_block = f"\nGemini {tag}:\n{gem_resp}\n"
+        except Exception as e:
+            logger.warning(f"gemini second opinion failed: {e}")
+
     msg = (f"BORDERLINE SETUP: {direction} (conviction {conviction}/5)\n"
            f"Reasons:\n  " + "\n  ".join(reasons) + "\n"
+           f"{gemini_block}"
            f"Not auto-executed. Tell Claude 'execute' to take it manually.")
     try:
         from alerts.channels import dispatch
@@ -331,7 +342,7 @@ def main():
             _save_state(state)
     elif conviction >= MIN_CONVICTION_ALERT:
         logger.info(f"Conviction {conviction}/5 -- alerting only")
-        alert_only(direction, conviction, reasons)
+        alert_only(direction, conviction, reasons, market)
 
 
 if __name__ == "__main__":
