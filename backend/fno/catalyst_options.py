@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from logzero import logger
 
 
-ENABLE_CATALYST_OPTIONS = True
+ENABLE_CATALYST_OPTIONS = False  # P28: disabled until catalyst-with-conviction is validated
 CHECK_INTERVAL_SEC = 120          # check news catalysts every 2 min
 SLOT_PCT_OF_EQUITY = 0.30
 STOP_PCT = 0.75                   # -25% premium

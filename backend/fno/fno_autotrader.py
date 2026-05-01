@@ -48,9 +48,18 @@ from logzero import logger
 
 
 # ---------- Activation gates ----------
-ENABLE_AUTOTRADER = True       # MASTER switch
-SIGNAL_INTERVAL_SEC = 30       # check every 30s (P25: was 60s)
-MAX_TRADES_PER_DAY = 8         # P25: was 4. Allows 1-2 trades per hour during active session
+# P28 (2026-05-01): DISABLED. 90-day backtest with friction showed all 6 signal
+# variants (reversal, gap-fade, gap-cont, breakout, last-hour, vix-spike) lose
+# money. Option friction (1.5% slippage + Rs 80 fees + theta decay) eats edge
+# of simple intraday patterns at retail scale.
+# Re-enable only after a strategy passes:
+#   - 90+ day backtest with friction
+#   - 3-fold walk-forward validation
+#   - Bootstrap CI 5th percentile > 0
+# See memory/persistence_directive.md for next strategy candidates.
+ENABLE_AUTOTRADER = False      # MASTER switch -- DISABLED until validated strategy
+SIGNAL_INTERVAL_SEC = 30
+MAX_TRADES_PER_DAY = 8
 
 # ---------- Signal thresholds ----------
 NIFTY_MOVE_THRESHOLD_PCT = 0.5     # min intraday move to consider a reversal
