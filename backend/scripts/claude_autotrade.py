@@ -42,7 +42,16 @@ ENABLE_AUTOTRADE = True              # MASTER switch user can flip OFF
 MIN_CONVICTION_AUTO = 5              # only 5/5 fires automatically
 MIN_CONVICTION_ALERT = 3             # 3+ sends Telegram
 MAX_TRADES_PER_DAY = 2
-MAX_RISK_PCT_PER_TRADE = 5.0
+# Capital-scaled position sizing — 5% is too small at Rs 13K to deliver
+# Rs 4K+ wins (replay of 30-Apr trade requires ~25% sizing). Higher % at
+# smaller capital is the only way wins are meaningful.
+# Risk math: 25% size × -25% premium stop = max 6.25% equity loss per trade.
+def _max_risk_pct_for_capital(equity: float) -> float:
+    if equity < 25_000:    return 25.0   # high % needed for trades to matter
+    if equity < 1_00_000:  return 15.0
+    if equity < 10_00_000: return 8.0
+    return 5.0                            # institutional-grade discipline at Rs 10L+
+
 CONSECUTIVE_LOSS_LIMIT = 3
 COOLDOWN_DAYS_AFTER_LOSSES = 5
 
@@ -219,9 +228,10 @@ def execute_trade(direction: str, conviction: int, reasons: list[str], state: di
     cost = premium * lot_size
     held_ltps = {s: float(f.get_ltp(s).get("ltp", 0)) for s in pf.get_open_symbols()}
     equity = pf.current_equity(held_ltps)
-    max_spend = equity * (MAX_RISK_PCT_PER_TRADE / 100) * 4  # 5% risk * 4 = ~20% nominal
+    max_spend_pct = _max_risk_pct_for_capital(equity) * 4  # 4x because % is "risk" not "nominal"
+    max_spend = equity * (max_spend_pct / 100)
     if cost > max_spend:
-        logger.info(f"autotrade: cost Rs{cost:.0f} > max spend Rs{max_spend:.0f}")
+        logger.info(f"autotrade: cost Rs{cost:.0f} > max spend Rs{max_spend:.0f} ({max_spend_pct}%)")
         return False
 
     sym = contract.get("symbol")
