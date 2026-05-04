@@ -100,7 +100,7 @@ state = StreamerState()
 
 # Silent-stall watchdog: if we haven't received any tick in STALL_THRESHOLD_SEC
 # during market hours, force the WebSocket closed so main_loop reconnects.
-STALL_THRESHOLD_SEC = 120
+STALL_THRESHOLD_SEC = 240  # match external watchdog; was 120 (too tight on Angel handshake)
 WATCHDOG_INTERVAL_SEC = 30
 
 
@@ -119,7 +119,12 @@ def _stall_watchdog():
 
 
 def _ensure_login():
-    """Login if needed; re-login if tokens are a day old. Captures tokens from session response."""
+    """Login if needed; re-login if tokens are a day old. Captures tokens from session response.
+
+    TOTP race: if data_fetcher just used the same 30s TOTP window in a sibling
+    process, Angel returns AB1050/AB1054 ('TOTP Mismatch'). We log the response
+    and let the caller sleep for a fresh window.
+    """
     today = datetime.now().date()
     if state.last_login_date == today and state.ws is not None:
         return True
@@ -129,15 +134,16 @@ def _ensure_login():
     try:
         api = SmartConnect(api_key=ANGEL_CREDENTIALS["api_key"])
         totp = pyotp.TOTP(ANGEL_CREDENTIALS["totp_secret"]).now()
+        logger.info(f"_ensure_login: calling generateSession with TOTP")
         resp = api.generateSession(
             clientCode=ANGEL_CREDENTIALS["client_id"],
             password=ANGEL_CREDENTIALS["pin"],
             totp=totp,
         )
         if not resp.get("status"):
-            logger.error(f"Angel login failed: {resp.get('message')}")
+            logger.error(f"Angel login failed status=False resp={resp}")
             return False
-        d = resp["data"]
+        d = resp.get("data") or {}
         jwt_token = d.get("jwtToken")
         feed_token = d.get("feedToken")
         if not jwt_token or not feed_token:
@@ -400,8 +406,10 @@ def main_loop():
             continue
 
         if not _ensure_login():
-            logger.error("Login failed; retrying in 60s")
-            time.sleep(60)
+            # Wait for fresh TOTP window (TOTP cycles every 30s; data_fetcher in
+            # a sibling process may have just used the same code).
+            logger.error("Login failed; retrying in 35s (fresh TOTP window)")
+            time.sleep(35)
             continue
 
         # Wire callbacks

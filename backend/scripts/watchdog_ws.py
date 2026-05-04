@@ -33,7 +33,9 @@ LIVE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "live_ticks
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 WS_RUNNER_REL = "streaming/ws_runner.py"
 
-STALE_THRESHOLD_SEC = 120
+STALE_THRESHOLD_SEC = 240  # bumped 2026-05-04: 120s was too aggressive,
+# killing ws_runner during its 60-90s login + connect handshake (esp. when
+# TOTP race with data_fetcher forces a 35s retry window).
 
 
 def _find_ws_runner_pids() -> list[int]:

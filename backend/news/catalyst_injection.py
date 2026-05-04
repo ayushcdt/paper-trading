@@ -97,9 +97,14 @@ CATALYST_NEGATIVE_KEYWORDS = [
 CATALYST_KEYWORDS = CATALYST_POSITIVE_KEYWORDS
 
 # Sentiment veto threshold: LM net score below this -> block buy.
-# Calibrated from research: -2.0 corresponds to ~3 net negative-word hits
-# across the cluster -- conservatively tuned to fire only on clear bad news.
-SENTIMENT_VETO_THRESHOLD = -2.0
+# 2026-05-04: raised from -2.0 to -4.0. Loughran-McDonald lexicon over-fires
+# negative on legitimate bank/financial news (words like "loss", "provisions",
+# "non-performing", "delinquency" are routine in earnings releases even when
+# the underlying numbers are positive). On 4-May ICICI/HDFC/KOTAK all blocked
+# despite real Q4-beat catalysts. -4.0 keeps the truly-bad news (-5+) out
+# while letting borderline news through to other gates (price confirmation,
+# junk filter, earnings exclusion).
+SENTIMENT_VETO_THRESHOLD = -4.0
 
 
 @dataclass

@@ -91,22 +91,40 @@ def compute_conviction(market_state: dict) -> tuple[int, list[str], str]:
     sectors = market_state.get("sectors", [])
     catalyst = market_state.get("catalyst_fired", False)
 
-    # FACTOR 1: NIFTY at intraday extreme + meaningful move
-    if (nifty["intraday_pct"] <= -1.0 and nifty["near_low"]):
-        reasons.append("NIFTY at intraday low after -1% move")
-        direction = "BULLISH"
-    elif (nifty["intraday_pct"] >= 1.0 and nifty["near_high"]):
-        reasons.append("NIFTY at intraday high after +1% move")
-        direction = "BEARISH"
-    else:
-        return 0, [], None  # no setup
+    # FACTOR 1+2: NIFTY at intraday extreme + open-to-now decides
+    # whether this is a REVERSAL setup or a TREND-CONTINUATION setup.
+    # Reversal pattern (30-Apr): NIFTY at extreme but open-to-now flipped opposite.
+    # Continuation pattern: NIFTY at extreme AND open-to-now keeps going same way.
+    nifty_at_high = nifty["intraday_pct"] >= 1.0 and nifty["near_high"]
+    nifty_at_low = nifty["intraday_pct"] <= -1.0 and nifty["near_low"]
+    if not (nifty_at_high or nifty_at_low):
+        return 0, [], None
 
-    # FACTOR 2: Recovery direction confirmed
-    if nifty.get("open_to_now") is not None:
-        if direction == "BULLISH" and nifty["open_to_now"] > -0.2:
-            reasons.append("Recovery direction (open-to-now flat or up)")
-        elif direction == "BEARISH" and nifty["open_to_now"] < 0.2:
-            reasons.append("Rolloff direction (open-to-now flat or down)")
+    oton = nifty.get("open_to_now") or 0
+    if nifty_at_high:
+        if oton > 0.3:
+            direction = "BULLISH"
+            reasons.append(f"NIFTY at intraday high after +{nifty['intraday_pct']:.2f}% (trend-up)")
+            reasons.append(f"Continuation: open-to-now still +{oton:.2f}%")
+        elif oton < 0.0:
+            direction = "BEARISH"
+            reasons.append(f"NIFTY at intraday high after +{nifty['intraday_pct']:.2f}% (rolloff)")
+            reasons.append(f"Reversal: open-to-now flipped to {oton:.2f}%")
+        else:
+            direction = "BULLISH"  # mixed -> default to continuation
+            reasons.append(f"NIFTY at intraday high after +{nifty['intraday_pct']:.2f}% (mixed open-to-now)")
+    else:  # nifty_at_low
+        if oton < -0.3:
+            direction = "BEARISH"
+            reasons.append(f"NIFTY at intraday low after {nifty['intraday_pct']:.2f}% (trend-down)")
+            reasons.append(f"Continuation: open-to-now still {oton:.2f}%")
+        elif oton > 0.0:
+            direction = "BULLISH"
+            reasons.append(f"NIFTY at intraday low after {nifty['intraday_pct']:.2f}% (recovery — 30-Apr pattern)")
+            reasons.append(f"Reversal: open-to-now flipped to +{oton:.2f}%")
+        else:
+            direction = "BEARISH"
+            reasons.append(f"NIFTY at intraday low after {nifty['intraday_pct']:.2f}% (mixed open-to-now)")
 
     # FACTOR 3: VIX regime
     if 12 <= vix <= 22:
