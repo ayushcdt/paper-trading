@@ -1,0 +1,42 @@
+name: Morning F&O Briefing
+
+# Runs at 08:32 IST = 03:02 UTC weekdays (Mon-Fri).
+# Cloud-shifted from local Windows Task Scheduler 2026-05-26 so local
+# machine no longer carries the load.
+
+on:
+  schedule:
+    - cron: "2 3 * * 1-5"  # 03:02 UTC = 08:32 IST, Mon-Fri
+  workflow_dispatch: {}    # allow manual run from the Actions tab
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run morning briefing
+        working-directory: backend
+        env:
+          ANGEL_API_KEY:     ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_SECRET_KEY:  ${{ secrets.ANGEL_SECRET_KEY }}
+          ANGEL_CLIENT_ID:   ${{ secrets.ANGEL_CLIENT_ID }}
+          ANGEL_PIN:         ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          NEWSAPP_SUPABASE_URL:      ${{ secrets.NEWSAPP_SUPABASE_URL }}
+          NEWSAPP_SUPABASE_ANON_KEY: ${{ secrets.NEWSAPP_SUPABASE_ANON_KEY }}
+        run: python scripts/morning_briefing.py
