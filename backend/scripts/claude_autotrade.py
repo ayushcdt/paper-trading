@@ -42,15 +42,16 @@ ENABLE_AUTOTRADE = True              # MASTER switch user can flip OFF
 MIN_CONVICTION_AUTO = 5              # only 5/5 fires automatically
 MIN_CONVICTION_ALERT = 3             # 3+ sends Telegram
 MAX_TRADES_PER_DAY = 2
-# Capital-scaled position sizing — 5% is too small at Rs 13K to deliver
-# Rs 4K+ wins (replay of 30-Apr trade requires ~25% sizing). Higher % at
-# smaller capital is the only way wins are meaningful.
-# Risk math: 25% size × -25% premium stop = max 6.25% equity loss per trade.
-def _max_risk_pct_for_capital(equity: float) -> float:
-    if equity < 25_000:    return 25.0   # high % needed for trades to matter
-    if equity < 1_00_000:  return 15.0
-    if equity < 10_00_000: return 8.0
-    return 5.0                            # institutional-grade discipline at Rs 10L+
+# Capital-scaled POSITION SIZE (% of equity to deploy per trade).
+# User directive 2026-05-01: bump from 25% to 40% at small capital tier.
+# Math: at Rs 13K with 40% position + -25% premium stop -> max loss Rs 1,300
+#       (= 10% of equity). At +50% target -> max gain Rs 2,600.
+# Bounded enough that 3 consecutive losses = -30% account (not wipeout).
+def _position_size_pct_for_capital(equity: float) -> float:
+    if equity < 25_000:    return 40.0   # was 25 — bumped per user 2026-05-01
+    if equity < 1_00_000:  return 30.0
+    if equity < 10_00_000: return 20.0
+    return 15.0
 
 CONSECUTIVE_LOSS_LIMIT = 3
 COOLDOWN_DAYS_AFTER_LOSSES = 5
@@ -90,22 +91,40 @@ def compute_conviction(market_state: dict) -> tuple[int, list[str], str]:
     sectors = market_state.get("sectors", [])
     catalyst = market_state.get("catalyst_fired", False)
 
-    # FACTOR 1: NIFTY at intraday extreme + meaningful move
-    if (nifty["intraday_pct"] <= -1.0 and nifty["near_low"]):
-        reasons.append("NIFTY at intraday low after -1% move")
-        direction = "BULLISH"
-    elif (nifty["intraday_pct"] >= 1.0 and nifty["near_high"]):
-        reasons.append("NIFTY at intraday high after +1% move")
-        direction = "BEARISH"
-    else:
-        return 0, [], None  # no setup
+    # FACTOR 1+2: NIFTY at intraday extreme + open-to-now decides
+    # whether this is a REVERSAL setup or a TREND-CONTINUATION setup.
+    # Reversal pattern (30-Apr): NIFTY at extreme but open-to-now flipped opposite.
+    # Continuation pattern: NIFTY at extreme AND open-to-now keeps going same way.
+    nifty_at_high = nifty["intraday_pct"] >= 1.0 and nifty["near_high"]
+    nifty_at_low = nifty["intraday_pct"] <= -1.0 and nifty["near_low"]
+    if not (nifty_at_high or nifty_at_low):
+        return 0, [], None
 
-    # FACTOR 2: Recovery direction confirmed
-    if nifty.get("open_to_now") is not None:
-        if direction == "BULLISH" and nifty["open_to_now"] > -0.2:
-            reasons.append("Recovery direction (open-to-now flat or up)")
-        elif direction == "BEARISH" and nifty["open_to_now"] < 0.2:
-            reasons.append("Rolloff direction (open-to-now flat or down)")
+    oton = nifty.get("open_to_now") or 0
+    if nifty_at_high:
+        if oton > 0.3:
+            direction = "BULLISH"
+            reasons.append(f"NIFTY at intraday high after +{nifty['intraday_pct']:.2f}% (trend-up)")
+            reasons.append(f"Continuation: open-to-now still +{oton:.2f}%")
+        elif oton < 0.0:
+            direction = "BEARISH"
+            reasons.append(f"NIFTY at intraday high after +{nifty['intraday_pct']:.2f}% (rolloff)")
+            reasons.append(f"Reversal: open-to-now flipped to {oton:.2f}%")
+        else:
+            direction = "BULLISH"  # mixed -> default to continuation
+            reasons.append(f"NIFTY at intraday high after +{nifty['intraday_pct']:.2f}% (mixed open-to-now)")
+    else:  # nifty_at_low
+        if oton < -0.3:
+            direction = "BEARISH"
+            reasons.append(f"NIFTY at intraday low after {nifty['intraday_pct']:.2f}% (trend-down)")
+            reasons.append(f"Continuation: open-to-now still {oton:.2f}%")
+        elif oton > 0.0:
+            direction = "BULLISH"
+            reasons.append(f"NIFTY at intraday low after {nifty['intraday_pct']:.2f}% (recovery — 30-Apr pattern)")
+            reasons.append(f"Reversal: open-to-now flipped to +{oton:.2f}%")
+        else:
+            direction = "BEARISH"
+            reasons.append(f"NIFTY at intraday low after {nifty['intraday_pct']:.2f}% (mixed open-to-now)")
 
     # FACTOR 3: VIX regime
     if 12 <= vix <= 22:
@@ -228,10 +247,10 @@ def execute_trade(direction: str, conviction: int, reasons: list[str], state: di
     cost = premium * lot_size
     held_ltps = {s: float(f.get_ltp(s).get("ltp", 0)) for s in pf.get_open_symbols()}
     equity = pf.current_equity(held_ltps)
-    max_spend_pct = _max_risk_pct_for_capital(equity) * 4  # 4x because % is "risk" not "nominal"
+    max_spend_pct = _position_size_pct_for_capital(equity)
     max_spend = equity * (max_spend_pct / 100)
     if cost > max_spend:
-        logger.info(f"autotrade: cost Rs{cost:.0f} > max spend Rs{max_spend:.0f} ({max_spend_pct}%)")
+        logger.info(f"autotrade: lot cost Rs{cost:.0f} > position cap Rs{max_spend:.0f} ({max_spend_pct}%)")
         return False
 
     sym = contract.get("symbol")
@@ -260,7 +279,7 @@ def execute_trade(direction: str, conviction: int, reasons: list[str], state: di
     return False
 
 
-def alert_only(direction: str, conviction: int, reasons: list[str]):
+def alert_only(direction: str, conviction: int, reasons: list[str], market_state: dict | None = None):
     """Telegram alert for 3-4/5 setups; user decides."""
     msg = (f"BORDERLINE SETUP: {direction} (conviction {conviction}/5)\n"
            f"Reasons:\n  " + "\n  ".join(reasons) + "\n"
@@ -330,7 +349,7 @@ def main():
             _save_state(state)
     elif conviction >= MIN_CONVICTION_ALERT:
         logger.info(f"Conviction {conviction}/5 -- alerting only")
-        alert_only(direction, conviction, reasons)
+        alert_only(direction, conviction, reasons, market)
 
 
 if __name__ == "__main__":

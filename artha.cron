@@ -1,0 +1,22 @@
+# Artha 2.0 paper-trading schedule (IST). Deployed to /etc/cron.d/artha (root:root 644).
+# Market-hours scripts self-skip outside 09:15-15:30 IST. Weekdays only (1-5).
+# VM system TZ is already Asia/Kolkata; CRON_TZ is belt-and-suspenders.
+CRON_TZ=Asia/Kolkata
+SHELL=/bin/bash
+
+# premarket picks / stance
+0 9 * * 1-5 ayush cd /home/ayush/artha/backend && OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/ayush/artha/venv/bin/python generate_analysis.py >> /home/ayush/artha/logs/analysis.log 2>&1
+# intraday: market data + regime + paper MTM (every 15 min; self-skips off-hours)
+*/15 9-15 * * 1-5 ayush cd /home/ayush/artha/backend && OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/ayush/artha/venv/bin/python scripts/intraday_refresh.py >> /home/ayush/artha/logs/intraday.log 2>&1
+# conviction scout (every 30 min)
+*/30 9-15 * * 1-5 ayush cd /home/ayush/artha/backend && OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/ayush/artha/venv/bin/python scripts/claude_autotrade.py >> /home/ayush/artha/logs/autotrade.log 2>&1
+# EOD Telegram summary
+35 15 * * 1-5 ayush cd /home/ayush/artha/backend && /home/ayush/artha/venv/bin/python scripts/daily_summary.py >> /home/ayush/artha/logs/summary.log 2>&1
+# postclose / next-day stance
+45 15 * * 1-5 ayush cd /home/ayush/artha/backend && /home/ayush/artha/venv/bin/python generate_analysis.py >> /home/ayush/artha/logs/analysis.log 2>&1
+# refresh historical bars for next session
+0 16 * * 1-5 ayush cd /home/ayush/artha/backend && /home/ayush/artha/venv/bin/python scripts/update_bars.py >> /home/ayush/artha/logs/bars.log 2>&1
+# nightly health check
+15 17 * * 1-5 ayush cd /home/ayush/artha/backend && /home/ayush/artha/venv/bin/python scripts/nightly_health_check.py >> /home/ayush/artha/logs/health.log 2>&1
+# monthly parameter recalibration (1st of month, 18:00)
+0 18 1 * * ayush cd /home/ayush/artha/backend && /home/ayush/artha/venv/bin/python scripts/recalibrate_params.py >> /home/ayush/artha/logs/recalibrate.log 2>&1

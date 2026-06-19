@@ -23,7 +23,7 @@ from typing import Optional
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "paper_trades.db"
 EXPORT_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "paper_portfolio.json"
 
-STARTING_CAPITAL = 10_000     # ₹10K -- realistic retail starting point
+STARTING_CAPITAL = 100_000     # bumped to Rs 1L on 2026-06-19 for live system test
 COST_PCT = 0.4                # round-trip cost estimate
 
 
