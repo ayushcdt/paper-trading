@@ -123,11 +123,15 @@ def _fetch_recent_articles(hours: int = 168) -> list[dict]:
             # entities + story_id added in Phase 2 for precise org matching + buzz signal.
             # govt + legal added: govt = PIB releases (RBI, fiscal); legal = SEBI orders + court
             # rulings (insider bans, listing suspensions) -- both move stocks immediately.
-            "select": "id,title,excerpt,body,source,category,published_at,url,entities,story_id",
+            # body field dropped 2026-05-04: it caused Postgres timeouts at limit>=500
+            # (article bodies are large and inflate payload past Supabase plan limits).
+            # Catalyst matching uses title+excerpt anyway; macro/sentiment falls back
+            # gracefully when body is missing (returns 0 score on empty string).
+            "select": "id,title,excerpt,source,category,published_at,url,entities,story_id",
             "category": "in.(business,wire,filings,govt,legal)",
             "published_at": f"gte.{cutoff}",
             "order": "published_at.desc",
-            "limit": "2000",
+            "limit": "1000",
         }
         headers = {
             "apikey": SUPABASE_ANON_KEY,

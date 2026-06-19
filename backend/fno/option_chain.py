@@ -31,7 +31,7 @@ def find_atm_strike(underlying: str, spot: float, expiry: str,
     if not contracts:
         return None
     # Strikes in scrip-master are stored as INR x 100
-    strikes = sorted({int(c.get("strike", 0)) // 100 for c in contracts if c.get("strike")})
+    strikes = sorted({int(float(c.get("strike", 0))) // 100 for c in contracts if c.get("strike")})
     if not strikes:
         return None
     return min(strikes, key=lambda s: abs(s - spot))
@@ -44,7 +44,7 @@ def find_contract(underlying: str, expiry: str, strike: int, opt_type: str,
     target_strike_units = strike * 100
     for c in contracts:
         sym = c.get("symbol", "")
-        if int(c.get("strike", 0)) == target_strike_units and sym.upper().endswith(opt_type.upper()):
+        if int(float(c.get("strike", 0))) == target_strike_units and sym.upper().endswith(opt_type.upper()):
             return c
     return None
 

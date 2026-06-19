@@ -1,0 +1,21 @@
+[Unit]
+Description=Artha WS streamer (paper trading engine: ticks + paper autotrader threads)
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ayush
+WorkingDirectory=/home/ayush/artha/backend
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/home/ayush/artha/venv/bin/python streaming/ws_runner.py
+Restart=always
+RestartSec=15
+Nice=10
+StandardOutput=append:/home/ayush/artha/logs/ws.log
+StandardError=append:/home/ayush/artha/logs/ws.log
+
+[Install]
+WantedBy=multi-user.target
