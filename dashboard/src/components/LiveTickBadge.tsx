@@ -14,11 +14,12 @@ interface Tick {
 }
 
 interface TickPayload {
-  status: 'live' | 'stale' | 'down' | 'no_data' | 'error'
+  status: 'live' | 'stale' | 'down' | 'market_closed' | 'no_data' | 'error'
   age_seconds?: number
   tick_count?: number
   ticks?: Record<string, Tick>
   generated_at?: string
+  market_open?: boolean
 }
 
 const POLL_INTERVAL_MS = 5000  // 5 sec client-side poll
@@ -62,11 +63,12 @@ export default function LiveTickBadge({ symbols = ['NIFTY', 'BANKNIFTY', 'INDIAV
   const ticks = data?.ticks ?? {}
 
   const indicator = {
-    live:    { cls: 'text-green-600',  label: 'LIVE',  pulse: true  },
-    stale:   { cls: 'text-yellow-600', label: 'STALE', pulse: false },
-    down:    { cls: 'text-red-600',    label: 'DOWN',  pulse: false },
-    no_data: { cls: 'text-gray-400',   label: 'IDLE',  pulse: false },
-    error:   { cls: 'text-red-600',    label: 'ERROR', pulse: false },
+    live:          { cls: 'text-green-600',  label: 'LIVE',          pulse: true  },
+    stale:         { cls: 'text-yellow-600', label: 'STALE',         pulse: false },
+    down:          { cls: 'text-red-600',    label: 'DOWN',          pulse: false },
+    market_closed: { cls: 'text-gray-500',   label: 'MARKET CLOSED', pulse: false },
+    no_data:       { cls: 'text-gray-400',   label: 'IDLE',          pulse: false },
+    error:         { cls: 'text-red-600',    label: 'ERROR',         pulse: false },
   }[status]
 
   return (
@@ -107,6 +109,11 @@ export default function LiveTickBadge({ symbols = ['NIFTY', 'BANKNIFTY', 'INDIAV
         <div className="flex items-center gap-1 text-red-600">
           <AlertTriangle className="w-3 h-3" />
           WebSocket down — showing last cached data
+        </div>
+      )}
+      {status === 'market_closed' && (
+        <div className="flex items-center gap-1 text-gray-500">
+          Market closed — showing previous close
         </div>
       )}
     </div>
