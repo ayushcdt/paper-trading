@@ -50,6 +50,8 @@ PORTFOLIO_CONFIG = {
         "picks_filename": "stocks.json",
         "variant_label": "momentum_agg_p2",
         "telegram_prefix": "P2 EQUITY",
+        "min_hold_days": 0,        # P2 = raw signal, drop on rank change
+        "monthly_rebalance": False,
     },
     "p3": {
         "db_filename": "paper_trades_p3.db",
@@ -58,6 +60,8 @@ PORTFOLIO_CONFIG = {
         "picks_filename": "stocks_p3.json",
         "variant_label": "momentum_hardened_p3",
         "telegram_prefix": "P3 HARDENED",
+        "min_hold_days": 365,      # LTCG: hold winners < 12mo even if rank falls
+        "monthly_rebalance": True, # only execute on 1st trading day of month
     },
 }
 
@@ -108,6 +112,37 @@ def _live_ltp(fetcher, symbol: str) -> float:
         return 0.0
 
 
+def _is_first_trading_day_of_month(today: datetime | None = None) -> bool:
+    """True if today is the first weekday of its month.
+    NSE holidays on the 1st are not modelled here — the run would simply
+    skip on that day (no rebalance), and the next month's 1st would catch up.
+    """
+    today = today or datetime.now()
+    if today.weekday() >= 5:
+        return False
+    for day in range(1, 8):
+        try:
+            candidate = today.replace(day=day)
+        except ValueError:
+            break
+        if candidate.weekday() < 5:
+            return today.day == day
+    return False
+
+
+def _position_age_days(entry_date_iso: str, today: datetime | None = None) -> int:
+    """Days between entry_date (ISO yyyy-mm-dd or full ISO) and today."""
+    if not entry_date_iso:
+        return 0
+    try:
+        # entry_date stored as "YYYY-MM-DD" via paper_marker; tolerate ISO datetime too
+        d = datetime.fromisoformat(entry_date_iso[:10])
+        ref = today or datetime.now()
+        return (ref.date() - d.date()).days
+    except Exception:
+        return 0
+
+
 def reconcile(portfolio: str, picks_filename: str | None = None) -> dict:
     """Single execution cycle. Returns a summary dict for logging / Telegram."""
     cfg = PORTFOLIO_CONFIG[portfolio]
@@ -126,6 +161,16 @@ def reconcile(portfolio: str, picks_filename: str | None = None) -> dict:
     if not target_syms:
         logger.warning(f"[{portfolio}] no picks in {picks_path.name}; nothing to do")
         summary["halt_reason"] = "no_picks"
+        return summary
+
+    # Monthly rebalance gate (P3): only open new positions on the 1st trading
+    # day of the month. Stops/forced exits still happen via paper_marker's
+    # per-tick check; on non-rebalance days the executor just exits.
+    monthly_only = bool(cfg.get("monthly_rebalance"))
+    is_rebal_day = _is_first_trading_day_of_month()
+    if monthly_only and not is_rebal_day:
+        logger.info(f"[{portfolio}] monthly cadence — today is not the 1st trading day; skipping reconcile")
+        summary["halt_reason"] = "non_rebalance_day"
         return summary
 
     halted, halt_reason = _picker_halted(picker_meta)
@@ -152,12 +197,31 @@ def reconcile(portfolio: str, picks_filename: str | None = None) -> dict:
                 f"| held {len(held_syms)} | target {len(target_syms)} | regime {regime}")
 
     # 1) Drops — close anything held that isn't in today's picks
+    min_hold_days = int(cfg.get("min_hold_days") or 0)
     for sym in sorted(held_syms - target_set):
         ltp = _live_ltp(fetcher, sym)
         if ltp <= 0:
             logger.warning(f"[{portfolio}] DROP {sym}: no LTP, skipping close")
             summary["skipped"].append({"symbol": sym, "reason": "no_ltp_for_drop"})
             continue
+
+        # LTCG hold preference (P3): if the position is < min_hold_days old AND
+        # currently a winner (LTP > entry), do not close it just because rank
+        # changed. Stops already take care of losers via paper_marker — those
+        # exits aren't blocked here because at that point LTP <= entry.
+        if min_hold_days > 0:
+            pos_obj = held.get(sym)
+            entry_price = float(pos_obj.entry_price) if pos_obj else 0.0
+            entry_date = pos_obj.entry_date if pos_obj else ""
+            age_days = _position_age_days(entry_date)
+            if age_days < min_hold_days and ltp > entry_price:
+                logger.info(
+                    f"[{portfolio}] HOLD-LTCG {sym}: age {age_days}d < {min_hold_days}d "
+                    f"and ltp Rs {ltp:.2f} > entry Rs {entry_price:.2f}; deferring drop"
+                )
+                summary["holds"].append(sym)
+                continue
+
         closed = pf.close_position(sym, ltp, reason=f"{portfolio} drop from picks")
         if closed:
             logger.info(f"[{portfolio}] CLOSED {sym} @ Rs {ltp:.2f}  pnl={closed.get('pnl_inr', 0):+.0f}")
