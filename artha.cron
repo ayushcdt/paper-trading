@@ -12,6 +12,9 @@ SHELL=/bin/bash
 */30 9-15 * * 1-5 ayush cd /home/ayush/artha/backend && OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/ayush/artha/venv/bin/python scripts/claude_autotrade.py >> /home/ayush/artha/logs/autotrade.log 2>&1
 # Portfolio 2 — equity rebalance from momentum_agg picks (one shot per day, 09:30)
 30 9 * * 1-5 ayush cd /home/ayush/artha/backend && OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/ayush/artha/venv/bin/python -m scripts.equity_executor --portfolio p2 >> /home/ayush/artha/logs/equity_p2.log 2>&1
+# Portfolio 3 — hardened picker (writes stocks_p3.json), then equity executor
+15 9 * * 1-5 ayush cd /home/ayush/artha/backend && OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/ayush/artha/venv/bin/python -m strategy.hardened_momentum_picker >> /home/ayush/artha/logs/hardened_picker.log 2>&1
+33 9 * * 1-5 ayush cd /home/ayush/artha/backend && OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 /home/ayush/artha/venv/bin/python -m scripts.equity_executor --portfolio p3 >> /home/ayush/artha/logs/equity_p3.log 2>&1
 # EOD Telegram summary
 35 15 * * 1-5 ayush cd /home/ayush/artha/backend && /home/ayush/artha/venv/bin/python scripts/daily_summary.py >> /home/ayush/artha/logs/summary.log 2>&1
 # postclose / next-day stance
