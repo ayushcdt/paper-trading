@@ -31,7 +31,9 @@ from config import VERCEL_CONFIG
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 FILE_MAP = {
-    "paper_portfolio":     "paper_portfolio.json",
+    "paper_portfolio":     "paper_portfolio.json",       # P1 (F&O)
+    "paper_portfolio_p2":  "paper_portfolio_p2.json",    # P2 (equity, momentum_agg)
+    "paper_portfolio_p3":  "paper_portfolio_p3.json",    # P3 (equity, hardened)
     "backtest_v1":         "backtest_results.json",
     "backtest_v2":         "backtest_v2_results.json",
     "backtest_v3":         "backtest_v3_results.json",
