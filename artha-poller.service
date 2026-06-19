@@ -1,0 +1,21 @@
+[Unit]
+Description=Artha F&O position poller (5s stop/target enforcement for open paper positions, esp. 0-DTE)
+After=network-online.target artha-ws.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ayush
+WorkingDirectory=/home/ayush/artha/backend
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/home/ayush/artha/venv/bin/python scripts/poll_fno_position.py
+Restart=always
+RestartSec=15
+Nice=10
+StandardOutput=append:/home/ayush/artha/logs/poller.log
+StandardError=append:/home/ayush/artha/logs/poller.log
+
+[Install]
+WantedBy=multi-user.target
