@@ -137,18 +137,29 @@ def _harden(base: dict) -> dict:
     for sym, sector in rejected_for_sector:
         audit.append(f"dropped {sym} (sector '{sector}' already had {MAX_NAMES_PER_SECTOR} picks)")
 
-    # 1. Stop tightening on the surviving picks
+    # 1. Stop normalization on the surviving picks.
+    # Three problem cases get clamped to MAX_STOP_PCT:
+    #   - stop missing / <= 0
+    #   - stop wider than -8% from entry (the discipline)
+    #   - stop >= entry price (stale / corporate-action data: would trip
+    #     PaperPortfolio's P18 guard and the pick would never open)
     for p in hardened_picks:
         cmp_val = float(p.get("cmp") or 0)
         stop = float(p.get("stop_loss") or 0)
         if cmp_val <= 0:
             continue
         worst_acceptable = cmp_val * (1.0 + MAX_STOP_PCT / 100.0)
-        if stop <= 0 or stop < worst_acceptable:
+        needs_fix = (stop <= 0) or (stop < worst_acceptable) or (stop >= cmp_val)
+        if needs_fix:
             old_stop_pct = (stop / cmp_val - 1) * 100 if stop > 0 else None
             p["stop_loss"] = round(worst_acceptable, 2)
             p["stop_pct"] = MAX_STOP_PCT
-            if old_stop_pct is not None:
+            if stop >= cmp_val and stop > 0:
+                audit.append(
+                    f"{p.get('symbol')}: stop {stop:.2f} >= cmp {cmp_val:.2f} "
+                    f"(stale / corporate action); clamped to {worst_acceptable:.2f} (-8%)"
+                )
+            elif old_stop_pct is not None:
                 audit.append(
                     f"{p.get('symbol')}: stop tightened from {old_stop_pct:.1f}% "
                     f"({stop:.2f}) to {MAX_STOP_PCT:.1f}% ({worst_acceptable:.2f})"
