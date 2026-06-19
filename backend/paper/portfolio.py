@@ -42,8 +42,12 @@ class Position:
 
 
 class PaperPortfolio:
-    def __init__(self, db_path: Path = DB_PATH):
+    def __init__(self, db_path: Path = DB_PATH,
+                 snapshot_path: Path = EXPORT_PATH,
+                 starting_capital: int = STARTING_CAPITAL):
         self.db_path = db_path
+        self.snapshot_path = snapshot_path
+        self.starting_capital = starting_capital
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
@@ -133,7 +137,7 @@ class PaperPortfolio:
                     ON trade_log(variant, date);
             """)
             c.execute("INSERT OR IGNORE INTO config VALUES (?, ?)",
-                      ("starting_capital", str(STARTING_CAPITAL)))
+                      ("starting_capital", str(self.starting_capital)))
             c.execute("INSERT OR IGNORE INTO config VALUES (?, ?)",
                       ("started_at", datetime.now().isoformat()))
 
@@ -183,7 +187,7 @@ class PaperPortfolio:
         return total
 
     def current_equity(self, latest_prices: dict[str, float]) -> float:
-        return STARTING_CAPITAL + self.get_realized_pnl_total() + self.get_unrealized_pnl(latest_prices)
+        return self.starting_capital + self.get_realized_pnl_total() + self.get_unrealized_pnl(latest_prices)
 
     def live_3m_return_by_variant(self) -> dict[str, float]:
         """Variant-level 3-month realized P&L % (of notional) from CLOSE trades."""
@@ -476,7 +480,7 @@ class PaperPortfolio:
         curve = []
         for d in all_dates:
             cum_realized += realized.get(d, 0)
-            equity = STARTING_CAPITAL + cum_realized + unrealized.get(d, 0)
+            equity = self.starting_capital + cum_realized + unrealized.get(d, 0)
             curve.append({"date": d, "equity": round(equity, 0),
                           "realized_cum": round(cum_realized, 0),
                           "unrealized": round(unrealized.get(d, 0), 0)})
@@ -551,7 +555,7 @@ class PaperPortfolio:
         realized = self.get_realized_pnl_total()
         unrealized = self.get_unrealized_pnl(latest_prices)
         equity = self.current_equity(latest_prices)
-        starting = STARTING_CAPITAL
+        starting = self.starting_capital
         with self._conn() as c:
             row = c.execute("SELECT value FROM config WHERE key='started_at'").fetchone()
         started_at = row[0] if row else None
@@ -587,6 +591,6 @@ class PaperPortfolio:
             "fees_summary": self.fees_summary(),
         }
 
-        EXPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        EXPORT_PATH.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
+        self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        self.snapshot_path.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
         return snap
