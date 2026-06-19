@@ -8,6 +8,8 @@ const redis = new Redis({
 
 const ALLOWED_KEYS = new Set([
   'paper_portfolio',
+  'paper_portfolio_p2',
+  'paper_portfolio_p3',
   'backtest_v1',
   'backtest_v2',
   'backtest_v3',

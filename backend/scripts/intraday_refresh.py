@@ -171,7 +171,28 @@ def intraday_refresh():
     logger.info("Syncing to Vercel...")
     main_ok = post_main_analysis(combined)
     pp_ok = post_blob("paper_portfolio", snap)
-    logger.info(f"  main analysis: {'OK' if main_ok else 'FAIL'} | paper portfolio: {'OK' if pp_ok else 'FAIL'}")
+    # Also push P2 + P3 snapshots if they exist on disk (written by
+    # equity_executor at 09:30/09:33 IST; this is the once-every-15-min
+    # path that keeps the dashboard's view fresh).
+    p2_ok = p3_ok = "skip"
+    p2_path = DATA_DIR / "paper_portfolio_p2.json"
+    p3_path = DATA_DIR / "paper_portfolio_p3.json"
+    if p2_path.exists():
+        try:
+            p2_ok = "OK" if post_blob("paper_portfolio_p2", json.loads(p2_path.read_text(encoding="utf-8"))) else "FAIL"
+        except Exception as e:
+            logger.warning(f"  p2 push failed: {e}")
+            p2_ok = "FAIL"
+    if p3_path.exists():
+        try:
+            p3_ok = "OK" if post_blob("paper_portfolio_p3", json.loads(p3_path.read_text(encoding="utf-8"))) else "FAIL"
+        except Exception as e:
+            logger.warning(f"  p3 push failed: {e}")
+            p3_ok = "FAIL"
+    logger.info(
+        f"  main analysis: {'OK' if main_ok else 'FAIL'} | "
+        f"paper portfolio: {'OK' if pp_ok else 'FAIL'} | p2: {p2_ok} | p3: {p3_ok}"
+    )
 
     logger.info("Intraday refresh complete")
 
